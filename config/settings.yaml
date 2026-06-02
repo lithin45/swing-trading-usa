@@ -1,0 +1,86 @@
+# =====================================================================
+# swing-signals configuration  (tunable params only — NO secrets here)
+# Secrets live in .env (gitignored). Validated by swing_signals/config_loader.py
+# on startup; a bad value fails fast with a clear error rather than producing
+# garbage signals. Edit weights/params here, never in code.
+# =====================================================================
+
+account:
+  equity: 500.0            # current account equity in USD; update as it scales
+  risk_pct: 0.01           # per-trade risk, fraction of equity (1% default)
+  risk_pct_ceiling: 0.02   # hard ceiling — sizing may never exceed this
+  fractional_shares: true  # required at ~$500 for percentage sizing to work
+  broker_min_order_usd: 1.0
+
+watchlist:
+  source: static           # static | universe_screen (screen added later)
+  # Starter set of liquid large-caps (placeholders — curate this).
+  # All should clear the liquidity floor under `universe` below.
+  symbols: [AAPL, MSFT, NVDA, AMZN, GOOGL, META, AVGO, JPM, XOM, UNH]
+
+# Per-stock composite factors (research files 01, 02, 03, 05, 06).
+# Equal-weight default (file 10). Disable a factor with enabled:false or weight:0.
+# The engine normalizes by the sum of active weights, so they need not sum to 1.
+factors:
+  technical:      {enabled: true, weight: 0.20}   # file 01
+  news_sentiment: {enabled: true, weight: 0.20}   # file 02
+  events:         {enabled: true, weight: 0.20}   # file 03
+  themes_cycles:  {enabled: true, weight: 0.20}   # file 05
+  smart_money:    {enabled: true, weight: 0.20}   # file 06
+
+scoring:
+  composite_min: 60.0      # minimum conviction (0-100) to emit a signal
+  agreement_min: 0.65      # confluence: fraction of weighted factors agreeing
+  tier_high: 80.0          # conviction tiers → position-size multiplier
+  tier_medium: 70.0
+  tier_low: 60.0
+
+# File 04 — market-level macro risk-on/off modifier (scales position size).
+macro:
+  enabled: true
+  risk_on_threshold: 55.0  # composite >= this → full size bias
+  risk_off_threshold: 35.0 # composite <= this → cut size / stand aside
+
+# File 07 — master market-regime gate (HARD override).
+regime:
+  enabled: true
+  spy_ma_days: 200
+  require_spy_above_ma: true        # no new longs if SPY below its 200-DMA
+  vix_max: 28.0                     # veto/throttle above this VIX
+  vix_backwardation_veto: true      # VIX/VIX3M > 1.0 → force one band lower
+
+# File 08 — hard risk & sizing constraints (all percentages of current equity).
+risk:
+  atr_period: 14
+  atr_stop_multiple: 2.0            # initial stop = entry - 2*ATR (swing default)
+  chandelier_lookback: 22           # trailing-stop lookback (~1 month)
+  chandelier_multiple: 3.0
+  rr_target: 2.0                    # reward:risk target (2R)
+  max_positions: 4                  # 2-4 concurrent at ~$500
+  portfolio_heat_cap: 0.06          # total open risk ceiling (6% conservative)
+  sector_heat_cap: 0.30             # max share of heat in one sector
+  max_per_sector: 2
+  daily_loss_halt: 0.03             # halt new entries at -3% day
+  weekly_loss_halt: 0.06
+  monthly_loss_halt: 0.10
+  drawdown_derisk: 0.10             # cut risk 50% when -10% from peak
+  drawdown_hard_halt: 0.15          # full halt + review at -15%
+
+# Liquidity floor (files 01/08/09) — keeps spread/slippage from eating the edge.
+universe:
+  min_price: 5.0
+  min_dollar_volume: 10_000_000     # $10M average daily dollar volume
+
+data:
+  provider_order: [yfinance, stooq] # first that succeeds wins
+  cache_dir: .cache
+  lookback_days: 400                # enough for 200-DMA + ATR warmup
+  max_staleness_days: 4             # data older than this → skip the stock (fail-loud)
+
+alerts:
+  channels: [telegram, email]       # email is the redundant backup
+  dry_run_default: false
+
+run:
+  output_dir: output
+  log_level: INFO

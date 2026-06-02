@@ -1,0 +1,43 @@
+# --- Secrets (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# --- Data cache, databases, generated output ---
+.cache/
+cache/
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+output/
+logs/
+*.log
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# --- Tooling / test artifacts ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
