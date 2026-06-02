@@ -9,10 +9,12 @@ from swing_signals.factors.base import Factor, SubScore
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry():
-    registry.clear_registry()
+def _isolate_registry():
+    # Snapshot/restore so built-in factors registered at import are not clobbered.
+    snapshot = dict(registry._REGISTRY)
     yield
-    registry.clear_registry()
+    registry._REGISTRY.clear()
+    registry._REGISTRY.update(snapshot)
 
 
 def test_register_and_lookup():

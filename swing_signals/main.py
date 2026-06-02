@@ -14,7 +14,7 @@ from datetime import date
 from .calendar_gate import is_early_close, is_holiday_aware, is_trading_day
 from .config_loader import Secrets, Settings, load_secrets, load_settings
 from .data.loader import DataLoader
-from .factors.registry import all_factors
+from .factors import register_builtins
 from .output.base import ConsoleAlerter
 
 log = logging.getLogger("swing_signals")
@@ -89,9 +89,9 @@ def run(
         log.warning("SKIP %s (fail-loud): %s", sym, "; ".join(issues))
 
     active = settings.active_factor_weights()
-    registered = sorted(all_factors())
+    registered = sorted(register_builtins())
     log.info("active factors (config): %s", active or "(none)")
-    log.info("registered factor plugins: %s", registered or "(none yet — added in Stage 3)")
+    log.info("registered factor plugins: %s", registered or "(none yet)")
     log.info("next stages not yet wired:")
     for stage in NEXT_STAGES:
         log.info("  [todo] %s", stage)
