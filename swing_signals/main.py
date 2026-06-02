@@ -13,19 +13,22 @@ from datetime import date
 
 from .calendar_gate import is_early_close, is_holiday_aware, is_trading_day
 from .config_loader import Secrets, Settings, load_secrets, load_settings
+from .context import RunContext
 from .data.loader import DataLoader
 from .factors import register_builtins
+from .market.f07_regime import RegimeModule
 from .output.base import ConsoleAlerter
+from .output.report import format_report
+from .scoring.engine import generate_signals
 
 log = logging.getLogger("swing_signals")
 
 # Stages still to come, logged so the wiring is visible.
 NEXT_STAGES = [
-    "Stage 3 per-stock factors 01/02/03/05/06 -> 0-100 sub-scores (+ reasons)",
-    "Stage 3 market modules — 04 macro (size multiplier), 07 regime (hard gate)",
-    "Stage 4 scoring engine — weighted composite + agreement + ATR entry/stop/target",
-    "Stage 4 gates — 07 regime veto, 04 macro multiplier, 08 risk sizing/heat/halts",
-    "Stage 6 persist signals + alert (Telegram primary, email backup)",
+    "Stage 3 add factors 02 news / 03 events / 04 macro / 05 themes / 06 smart-money (keys)",
+    "Stage 5 backtest harness (realistic costs, no lookahead/survivorship)",
+    "Stage 6 persist signals to SQLite + alert (Telegram primary, email backup)",
+    "Stage 7 cloud scheduling (unattended)",
 ]
 
 
@@ -83,29 +86,41 @@ def run(
     data = loader.load_watchlist(symbols, today, offline=offline)
     passed = [s for s, sd in data.items() if sd.ok]
     skipped = {s: sd.issues for s, sd in data.items() if not sd.ok}
-
     log.info("watchlist data: %d/%d symbols passed quality gate", len(passed), len(symbols))
     for sym, issues in skipped.items():
         log.warning("SKIP %s (fail-loud): %s", sym, "; ".join(issues))
 
+    # Build the shared run context, evaluate the regime gate, then score.
+    ctx = RunContext(
+        settings=settings, secrets=secrets, trading_day=today,
+        equity=settings.account.equity, market=market, dry_run=dry_run,
+    )
+    regime = RegimeModule().compute(ctx)
+    log.info("regime gate: %s (score %s, size x%s, veto=%s)",
+             regime.state, regime.score, regime.multiplier, regime.veto)
+
     active = settings.active_factor_weights()
     registered = sorted(register_builtins())
     log.info("active factors (config): %s", active or "(none)")
-    log.info("registered factor plugins: %s", registered or "(none yet)")
-    log.info("next stages not yet wired:")
+    log.info("registered factor plugins: %s", registered or "(none)")
+    missing = [f for f in active if f not in registered]
+    if missing:
+        log.info("factors awaiting later stages/keys (excluded from composite): %s", missing)
+
+    result = generate_signals(data, ctx, regime)
+    log.info("signals: %d actionable LONG, %d no-trade",
+             len(result.actionable), len(result.no_trades))
+
+    report = format_report(result, settings=settings, today=today, regime=regime)
+    if dry_run:
+        ConsoleAlerter().send(subject=f"swing-signals {today}", body=report)
+    else:
+        # Real alerting (Telegram/email) + persistence land in Stage 6.
+        print(report)
+
+    log.info("next stages:")
     for stage in NEXT_STAGES:
         log.info("  [todo] %s", stage)
-
-    if dry_run:
-        body = (
-            f"Stage 2 data layer OK for {today}.\n"
-            f"Indices loaded: {indices_loaded or 'none'} | VIX: "
-            f"{market.vix if market.vix is not None else 'NA'}\n"
-            f"Watchlist: {len(passed)}/{len(symbols)} passed quality"
-            + (f"; skipped {sorted(skipped)}" if skipped else "")
-            + "\nNo signals yet (scoring lands in Stage 4)."
-        )
-        ConsoleAlerter().send(subject=f"swing-signals data check {today}", body=body)
-
-    log.info("Stage 2 run complete — data assembled; no signals produced yet (expected)")
+    log.info("run complete — %d actionable signal(s) (decision support; no orders placed)",
+             len(result.actionable))
     return 0
