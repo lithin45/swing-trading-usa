@@ -14,12 +14,12 @@ def test_version_present():
 
 
 def test_dry_run_on_weekday_returns_zero():
-    # 2024-01-08 is a Monday.
-    assert run(dry_run=True, today=date(2024, 1, 8)) == 0
+    # 2024-01-08 is a Monday. offline=True => cache-only, no network in CI.
+    assert run(dry_run=True, offline=True, today=date(2024, 1, 8)) == 0
 
 
 def test_no_op_on_weekend_returns_zero():
-    # 2024-01-06 is a Saturday.
+    # 2024-01-06 is a Saturday — exits at the calendar gate before any data.
     assert run(dry_run=True, today=date(2024, 1, 6)) == 0
 
 

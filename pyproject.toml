@@ -22,17 +22,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Stage 2 — data layer (free-first sources)
+# Stage 2 — price/market data layer (free-first sources)
 data = [
     "yfinance>=0.2.40",
-    "pandas-datareader>=0.10",   # Stooq fallback
-    "fredapi>=0.5",
-    "finnhub-python>=2.4",
-    "edgartools>=3.0",
+    "fredapi>=0.5",              # macro + VIX
     "pandas-market-calendars>=4.4",
-    "requests>=2.31",
+    "requests>=2.31",            # also drives the Stooq CSV fallback
     "tenacity>=8.2",
     "pyarrow>=15.0",             # parquet cache
+]
+# Stage 3 — "soft" data for news/events/insider factors
+softdata = [
+    "finnhub-python>=2.4",       # news, earnings calendar, insider
+    "edgartools>=3.0",           # SEC Form 4 / 8-K / filings
 ]
 # Stage 3+ — local technical-indicator computation
 indicators = ["pandas-ta>=0.3.14b0"]

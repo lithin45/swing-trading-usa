@@ -72,10 +72,17 @@ universe:
   min_dollar_volume: 10_000_000     # $10M average daily dollar volume
 
 data:
-  provider_order: [yfinance, stooq] # first that succeeds wins
+  provider_order: [yfinance, stooq] # first that succeeds wins (stooq needs a key)
   cache_dir: .cache
   lookback_days: 400                # enough for 200-DMA + ATR warmup
   max_staleness_days: 4             # data older than this → skip the stock (fail-loud)
+  index_symbols: [SPY, QQQ, IWM]    # market-context indices (regime/breadth)
+  fred_series:                      # macro/vol series pulled from FRED (file 04/07)
+    vix: VIXCLS
+    vix3m: VXVCLS
+    t10y2y: T10Y2Y
+    dgs10: DGS10
+    hy_oas: BAMLH0A0HYM2
 
 alerts:
   channels: [telegram, email]       # email is the redundant backup

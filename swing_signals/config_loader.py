@@ -134,6 +134,8 @@ class DataCfg(StrictModel):
     cache_dir: str = ".cache"
     lookback_days: int = Field(gt=0)
     max_staleness_days: int = Field(ge=0)
+    index_symbols: list[str] = Field(default_factory=lambda: ["SPY", "QQQ", "IWM"])
+    fred_series: dict[str, str] = Field(default_factory=dict)
 
 
 class AlertsCfg(StrictModel):
@@ -203,6 +205,7 @@ class Secrets(BaseSettings):
 
     fred_api_key: SecretStr | None = None
     finnhub_api_key: SecretStr | None = None
+    stooq_api_key: SecretStr | None = None
     sec_edgar_user_agent: str | None = None
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None

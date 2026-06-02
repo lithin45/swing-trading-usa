@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the pipeline without sending alerts; print them to the console instead.",
     )
     p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Use cached data only; never hit the network (deterministic local run).",
+    )
+    p.add_argument(
         "--config",
         default=None,
         metavar="PATH",
@@ -40,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
     dry_run = args.dry_run or settings.alerts.dry_run_default
-    return run(settings=settings, secrets=secrets, dry_run=dry_run)
+    return run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline)
 
 
 if __name__ == "__main__":

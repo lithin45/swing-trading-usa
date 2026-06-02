@@ -1,0 +1,136 @@
+"""DataLoader — the orchestration the rest of the app talks to.
+
+Builds the price-provider chain from config, layers the Parquet cache in front,
+and assembles per-symbol data + market context. Resilience is the point:
+cache-first → providers in order → stale-cache last resort, and the per-symbol
+quality gate marks (never crashes on) bad/stale data so the engine can skip it.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, timedelta
+
+import pandas as pd
+
+from ..config_loader import Secrets, Settings
+from ..context import MarketContext, SymbolData
+from .cache import OHLCVCache
+from .fred_provider import FredProvider
+from .market import build_market_context
+from .quality import check_ohlcv_quality
+from .retry import PermanentDataError
+from .stooq_provider import StooqProvider
+from .yfinance_provider import YfinanceProvider
+
+log = logging.getLogger("swing_signals.data")
+
+
+class DataLoader:
+    def __init__(self, settings: Settings, secrets: Secrets) -> None:
+        self.settings = settings
+        self.secrets = secrets
+        self.cache = OHLCVCache(settings.data.cache_dir)
+        self.providers = self._build_price_providers()
+        self.fred = FredProvider(_reveal(secrets.fred_api_key))
+
+    # -- construction -------------------------------------------------------
+    def _build_price_providers(self) -> list:
+        providers: list = []
+        for name in self.settings.data.provider_order:
+            if name == "yfinance":
+                providers.append(YfinanceProvider())
+            elif name == "stooq":
+                sp = StooqProvider(api_key=_reveal(self.secrets.stooq_api_key))
+                if sp.available:
+                    providers.append(sp)
+                else:
+                    log.info("stooq fallback disabled (no SWING_STOOQ_API_KEY)")
+            else:
+                log.warning("unknown price provider %r in provider_order; skipping", name)
+        if not providers:
+            raise ValueError("no usable price providers configured (check provider_order/keys)")
+        return providers
+
+    def _min_rows(self) -> int:
+        # Enough history for the longest moving average we use (e.g. 200-DMA) + buffer.
+        return max(self.settings.regime.spy_ma_days, 200) + 5
+
+    # -- OHLCV with cache + fallback ---------------------------------------
+    def get_ohlcv(
+        self, symbol: str, start: str, end: str, *, asof: date | None = None, offline: bool = False
+    ) -> pd.DataFrame:
+        # 1) fresh cache short-circuits the network (idempotent re-runs).
+        if asof is not None:
+            fresh = self.cache.fresh_for(symbol, asof, self.settings.data.max_staleness_days)
+            if fresh is not None:
+                return fresh
+
+        # 2) offline mode: cache only.
+        if offline:
+            cached = self.cache.get(symbol)
+            if cached is not None:
+                return cached
+            raise PermanentDataError(f"offline: no cached data for {symbol}")
+
+        # 3) try providers in order; cache each success.
+        errors: list[str] = []
+        for provider in self.providers:
+            try:
+                df = provider.get_ohlcv(symbol, start, end)
+                self.cache.put(symbol, df)
+                return df
+            except Exception as exc:  # noqa: BLE001 - try the next provider
+                errors.append(f"{provider.name}: {exc}")
+                log.warning("provider %s failed for %s: %s", provider.name, symbol, exc)
+
+        # 4) last resort: stale cache beats no data (the quality gate will flag it).
+        cached = self.cache.get(symbol)
+        if cached is not None:
+            log.warning("using stale cache for %s after all providers failed", symbol)
+            return cached
+        raise PermanentDataError(f"all providers failed for {symbol}: {errors}")
+
+    # -- public API ---------------------------------------------------------
+    def load_symbol(self, symbol: str, asof: date, *, offline: bool = False) -> SymbolData:
+        """Never raises — failures are recorded on SymbolData.issues (fail-loud)."""
+        start = (asof - timedelta(days=self.settings.data.lookback_days)).isoformat()
+        end = (asof + timedelta(days=1)).isoformat()
+        sd = SymbolData(symbol=symbol)
+        try:
+            sd.ohlcv = self.get_ohlcv(symbol, start, end, asof=asof, offline=offline)
+        except Exception as exc:  # noqa: BLE001
+            sd.issues.append(f"{symbol}: fetch failed ({exc})")
+            return sd
+        sd.issues.extend(
+            check_ohlcv_quality(
+                sd.ohlcv,
+                symbol=symbol,
+                asof=asof,
+                min_rows=self._min_rows(),
+                max_staleness_days=self.settings.data.max_staleness_days,
+            )
+        )
+        return sd
+
+    def load_watchlist(
+        self, symbols: list[str], asof: date, *, offline: bool = False
+    ) -> dict[str, SymbolData]:
+        return {sym: self.load_symbol(sym, asof, offline=offline) for sym in symbols}
+
+    def load_market_context(self, asof: date, *, offline: bool = False) -> MarketContext:
+        def _ohlcv(sym: str, start: str, end: str) -> pd.DataFrame:
+            return self.get_ohlcv(sym, start, end, asof=asof, offline=offline)
+
+        return build_market_context(
+            get_ohlcv=_ohlcv,
+            fred=self.fred,
+            index_symbols=self.settings.data.index_symbols,
+            fred_series=self.settings.data.fred_series,
+            lookback_days=self.settings.data.lookback_days,
+            asof=asof,
+        )
+
+
+def _reveal(secret) -> str | None:
+    return secret.get_secret_value() if secret is not None else None
