@@ -36,8 +36,8 @@ softdata = [
     "finnhub-python>=2.4",       # news, earnings calendar, insider
     "edgartools>=3.0",           # SEC Form 4 / 8-K / filings
 ]
-# Stage 3+ — local technical-indicator computation
-indicators = ["pandas-ta>=0.3.14b0"]
+# (Technical indicators are computed locally in factors/indicators.py — no
+#  pandas-ta/TA-Lib dependency, which also avoids their NumPy-2/py3.14 breakage.)
 # Persistence
 db = ["sqlalchemy>=2.0"]
 # Stage 6 — alerting
