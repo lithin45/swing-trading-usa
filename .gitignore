@@ -12,8 +12,8 @@ cache/
 *.sqlite
 *.sqlite3
 *.parquet
-output/
-logs/
+/output/
+/logs/
 *.log
 
 # --- Python ---
