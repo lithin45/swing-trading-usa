@@ -117,6 +117,7 @@ def _tier_of(score: float, cfg) -> str:
 
 
 def _liquidity_ok(sd: SymbolData, settings) -> tuple[bool, float, float]:
+    assert sd.ohlcv is not None  # caller gates on data integrity before this runs
     close = sd.ohlcv["close"]
     volume = sd.ohlcv["volume"]
     price = float(close.iloc[-1])
@@ -193,10 +194,16 @@ def generate_signals(
         # --- soft gates: conviction + agreement thresholds ---
         reject = None
         if score < settings.scoring.composite_min:
-            reject = f"below conviction threshold ({score:.0f} < {settings.scoring.composite_min:.0f})"
+            reject = (
+                f"below conviction threshold "
+                f"({score:.0f} < {settings.scoring.composite_min:.0f})"
+            )
         elif agreement < settings.scoring.agreement_min:
             flags.append("LOW_AGREEMENT")
-            reject = f"low factor agreement ({agreement:.0%} < {settings.scoring.agreement_min:.0%})"
+            reject = (
+                f"low factor agreement "
+                f"({agreement:.0%} < {settings.scoring.agreement_min:.0%})"
+            )
         if reject:
             no_trades.append(Signal(
                 ticker=ticker, signal_date=sig_date, direction="NO-TRADE",
@@ -208,7 +215,12 @@ def generate_signals(
             continue
 
         # --- levels (ATR) + sizing (equity, conviction- and regime-scaled) ---
-        atr14 = float(ind.atr(sd.ohlcv["high"], sd.ohlcv["low"], sd.ohlcv["close"], settings.risk.atr_period).iloc[-1])
+        atr14 = float(
+            ind.atr(
+                sd.ohlcv["high"], sd.ohlcv["low"], sd.ohlcv["close"],
+                settings.risk.atr_period,
+            ).iloc[-1]
+        )
         levels = compute_levels(
             ref_price=price, atr=atr14,
             high=sd.ohlcv["high"], low=sd.ohlcv["low"], close=sd.ohlcv["close"],

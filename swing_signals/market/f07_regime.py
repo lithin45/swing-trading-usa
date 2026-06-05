@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _MIN_BARS = 210
 
 
-def _above_200dma(df: "pd.DataFrame | None") -> bool | None:
+def _above_200dma(df: pd.DataFrame | None) -> bool | None:
     if df is None or len(df) < _MIN_BARS:
         return None
     return float(df["close"].iloc[-1]) > float(ind.sma(df["close"], 200).iloc[-1])
@@ -37,15 +37,15 @@ class RegimeModule(MarketModule):
     def compute(self, ctx: RunContext) -> MarketState:
         market = ctx.market
         cfg = ctx.settings.regime
-        spy = market.spy if market is not None else None
 
         # Fail-safe: can't assess the regime -> no new longs.
-        if spy is None or len(spy) < _MIN_BARS:
+        if market is None or market.spy is None or len(market.spy) < _MIN_BARS:
             return MarketState(
                 name=self.name, score=0.0, state="RED", multiplier=0.0, veto=True,
                 reasons=["regime data unavailable (SPY missing/short) — fail-safe veto"],
                 raw={"degraded": True},
             )
+        spy = market.spy
 
         close = spy["close"]
         c = float(close.iloc[-1])

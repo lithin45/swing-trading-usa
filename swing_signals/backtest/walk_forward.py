@@ -18,7 +18,6 @@ import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from .metrics import compute_metrics
 from .runner import BacktestResult, BacktestRunner
 
 log = logging.getLogger("swing_signals.backtest")

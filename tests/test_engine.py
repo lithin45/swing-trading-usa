@@ -33,7 +33,9 @@ def _sd(symbol, path, vol=1_000_000.0):
 
 def _ctx():
     s = load_settings()
-    return RunContext(settings=s, secrets=load_secrets(), trading_day=MONDAY, equity=s.account.equity)
+    return RunContext(
+        settings=s, secrets=load_secrets(), trading_day=MONDAY, equity=s.account.equity
+    )
 
 
 _UP = np.linspace(50, 150, 260)
@@ -84,7 +86,9 @@ def test_illiquid_is_no_trade():
 def test_ranking_and_max_positions_cap():
     s = load_settings()
     s.risk.max_positions = 3
-    ctx = RunContext(settings=s, secrets=load_secrets(), trading_day=MONDAY, equity=s.account.equity)
+    ctx = RunContext(
+        settings=s, secrets=load_secrets(), trading_day=MONDAY, equity=s.account.equity
+    )
     data = {f"S{i}": _sd(f"S{i}", _UP + i) for i in range(6)}
     result = generate_signals(data, ctx, GREEN)
     assert len(result.actionable) == 3  # capped

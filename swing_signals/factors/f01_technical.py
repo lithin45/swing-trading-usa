@@ -17,8 +17,6 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import pandas as pd
-
 from . import indicators as ind
 from .base import NEUTRAL, Factor, SubScore
 from .registry import register
@@ -88,6 +86,10 @@ class TechnicalFactor(Factor):
             return SubScore.unavailable(self.name, "core indicators NaN (insufficient/dirty data)")
 
         comps: list[_Component] = []
+        # `s` (component score) and `r` (its reason, None when it doesn't fire)
+        # are rebound in each block below; declare once so the type is stable.
+        s: float
+        r: str | None
 
         # 1. Long-term trend filter vs SMA200 (T1)
         if c >= 1.02 * sma200:

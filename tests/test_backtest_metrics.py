@@ -88,7 +88,8 @@ def test_ticker_breakdown_present():
 # pytest_approx shim for standalone use
 import math  # noqa: E402
 
-def pytest_approx(val: float, rel: float = 1e-6) -> "_Approx":
+
+def pytest_approx(val: float, rel: float = 1e-6) -> _Approx:
     return _Approx(val, rel)
 
 class _Approx:

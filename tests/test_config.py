@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import yaml
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from swing_signals.config_loader import (

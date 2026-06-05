@@ -1,0 +1,44 @@
+name: CI
+
+# Lint, type-check, and test on every push to main and every PR.
+# The test suite is hermetic — pyproject's default `-m 'not network'` deselects
+# the live-API tests, so CI never depends on yfinance/FRED/etc. being reachable.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (with data + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,data]"
+
+      - name: Ruff (lint)
+        run: ruff check swing_signals tests
+
+      - name: Mypy (type-check)
+        run: mypy swing_signals
+
+      - name: Pytest
+        run: pytest -q
