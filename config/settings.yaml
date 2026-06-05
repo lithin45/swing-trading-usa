@@ -91,6 +91,8 @@ alerts:
 run:
   output_dir: output
   log_level: INFO
+  db_url: "sqlite:///signals.db"   # signal/outcome/run log (gitignored; Postgres-ready via URL)
+  persist: true                    # persist each real run's signals (dry-run never writes)
 
 # Stage 5 backtest parameters (file 11).
 # cost_bps: per-side spread+slippage in basis points ($0 commission for US equities).

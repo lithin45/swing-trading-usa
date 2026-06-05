@@ -146,6 +146,8 @@ class AlertsCfg(StrictModel):
 class RunCfg(StrictModel):
     output_dir: str = "output"
     log_level: str = "INFO"
+    db_url: str = "sqlite:///signals.db"
+    persist: bool = True
 
 
 class Settings(StrictModel):

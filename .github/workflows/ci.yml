@@ -32,7 +32,7 @@ jobs:
       - name: Install (with data + dev extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,data]"
+          pip install -e ".[dev,data,db]"
 
       - name: Ruff (lint)
         run: ruff check swing_signals tests

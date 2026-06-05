@@ -45,7 +45,8 @@ def format_report(
     lines.append(
         f"Equity ${settings.account.equity:,.2f} | risk/trade "
         f"{settings.account.risk_pct:.2%} (ceiling {settings.account.risk_pct_ceiling:.2%}) | "
-        f"max {settings.risk.max_positions} positions, heat cap {settings.risk.portfolio_heat_cap:.0%}"
+        f"max {settings.risk.max_positions} positions, "
+        f"heat cap {settings.risk.portfolio_heat_cap:.0%}"
     )
     regime_reasons = "; ".join(regime.reasons[:3])
     lines.append(

@@ -22,9 +22,9 @@ from .scoring.engine import generate_signals
 log = logging.getLogger("swing_signals")
 
 NEXT_STAGES = [
-    "Stage 3 add factors 02 news / 03 events / 04 macro / 05 themes / 06 smart-money (keys)",
-    "Stage 6 persist signals to SQLite + alert (Telegram primary, email backup)",
-    "Stage 7 cloud scheduling (unattended)",
+    "Stage 3 add factors 02 news / 03 events / 05 themes / 06 smart-money (need API keys)",
+    "Stage 6 alerting: Telegram primary + email backup + failure alerts",
+    "Stage 7 cloud scheduling (unattended) + healthcheck dead-man's switch",
 ]
 
 
@@ -33,6 +33,23 @@ def configure_logging(level: str) -> None:
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def _persist(settings: Settings, today: date, result) -> None:
+    """Best-effort write of the run + its signals to the DB (never fails the run)."""
+    try:
+        from .persistence.repository import persist_daily_run
+    except ImportError:
+        log.warning(
+            "persistence enabled but SQLAlchemy not installed "
+            "(pip install -e '.[db]'); skipping DB write"
+        )
+        return
+    try:
+        n = persist_daily_run(settings, today, result.actionable)
+        log.info("persisted %d signal(s) to %s", n, settings.run.db_url)
+    except Exception as exc:  # noqa: BLE001 - a DB error must not fail the signal run
+        log.warning("persistence failed (continuing): %s", exc)
 
 
 def run(
@@ -113,8 +130,9 @@ def run(
     if dry_run:
         ConsoleAlerter().send(subject=f"swing-signals {today}", body=report)
     else:
-        # Real alerting (Telegram/email) + persistence land in Stage 6.
         print(report)
+        if settings.run.persist:
+            _persist(settings, today, result)
 
     log.info("next stages:")
     for stage in NEXT_STAGES:
