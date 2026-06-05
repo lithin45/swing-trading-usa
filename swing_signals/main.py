@@ -52,6 +52,23 @@ def _persist(settings: Settings, today: date, result) -> None:
         log.warning("persistence failed (continuing): %s", exc)
 
 
+def _dispatch_report(settings: Settings, secrets: Secrets, *, subject: str, body: str) -> None:
+    """Send the daily report to all configured channels; console fallback if none/all fail."""
+    from .output.dispatch import build_alerters, dispatch
+
+    alerters = build_alerters(settings, secrets)
+    if not alerters:
+        ConsoleAlerter().send(subject=subject, body=body)
+        return
+    sent = dispatch(alerters, subject, body)
+    if sent == 0:
+        log.warning("all alert channels failed — printing report to console instead")
+        ConsoleAlerter().send(subject=subject, body=body)
+    else:
+        log.info("report delivered to %d channel(s): %s",
+                 sent, ", ".join(a.name for a in alerters))
+
+
 def run(
     *,
     settings: Settings | None = None,
@@ -130,7 +147,7 @@ def run(
     if dry_run:
         ConsoleAlerter().send(subject=f"swing-signals {today}", body=report)
     else:
-        print(report)
+        _dispatch_report(settings, secrets, subject=f"swing-signals {today}", body=report)
         if settings.run.persist:
             _persist(settings, today, result)
 

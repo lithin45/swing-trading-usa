@@ -51,6 +51,15 @@ def _add_run_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--config", default=None, metavar="PATH")
 
 
+def _alert_failure(settings, secrets, error: str) -> None:
+    """Best-effort failure alert (dead-man's switch); never masks the original error."""
+    try:
+        from .output.dispatch import build_alerters, dispatch_failure
+        dispatch_failure(build_alerters(settings, secrets), error)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -73,7 +82,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Default: daily run (``swing-signals`` or ``swing-signals run``).
     dry_run = args.dry_run or settings.alerts.dry_run_default
-    return run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline)
+    try:
+        return run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline)
+    except Exception as exc:  # noqa: BLE001 - fail loud: surface + alert, never silent
+        print(f"run failed: {exc}", file=sys.stderr)
+        if not dry_run:
+            _alert_failure(settings, secrets, str(exc))
+        return 1
 
 
 if __name__ == "__main__":
