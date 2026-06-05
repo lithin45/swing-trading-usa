@@ -20,6 +20,7 @@ import pandas as pd
 from ..config_loader import Secrets, Settings
 from ..context import MarketContext, RunContext, SymbolData
 from ..factors import register_builtins
+from ..factors.f01_technical import build_panel
 from ..market.f07_regime import RegimeModule
 from ..scoring.engine import generate_signals
 from .config import BacktestCfg
@@ -92,6 +93,7 @@ class BacktestRunner:
         self.index_ohlcv = index_ohlcv
         self.secrets = secrets
         self.costs = CostModel(per_side_bps=bt_cfg.cost_bps)
+        self._panels: dict[str, pd.DataFrame] = {}  # per-symbol precomputed indicator panel
         register_builtins()
 
     # ------------------------------------------------------------------
@@ -237,7 +239,13 @@ class BacktestRunner:
         return sorted(bar_set)
 
     def _build_symbol_data(self, asof: date) -> dict[str, SymbolData]:
-        """Return SymbolData sliced to bars <= asof (no lookahead)."""
+        """Return SymbolData sliced to bars <= asof (no lookahead).
+
+        For symbols with enough history, attach the precomputed indicator row at
+        ``asof`` (built once per symbol) so the technical factor reads O(1) scalars
+        rather than recomputing every indicator over the slice on each bar.
+        """
+        ts = pd.Timestamp(asof)
         result: dict[str, SymbolData] = {}
         for ticker, df in self.ohlcv_all.items():
             if df is None or len(df) == 0:
@@ -249,8 +257,20 @@ class BacktestRunner:
             sd = SymbolData(symbol=ticker, ohlcv=sliced if len(sliced) > 0 else None)
             if sd.ohlcv is None or len(sd.ohlcv) < self.bt_cfg.warmup_bars:
                 sd.issues.append(f"{ticker}: insufficient bars at {asof}")
+            else:
+                panel = self._panel_for(ticker, df).loc[:ts]
+                if len(panel) > 0:
+                    sd.indicators = panel.iloc[-1].to_dict()
             result[ticker] = sd
         return result
+
+    def _panel_for(self, ticker: str, df: pd.DataFrame) -> pd.DataFrame:
+        """Indicator panel over a symbol's full history, computed once and cached."""
+        panel = self._panels.get(ticker)
+        if panel is None:
+            panel = build_panel(df)
+            self._panels[ticker] = panel
+        return panel
 
     def _build_market_context(self, asof: date) -> MarketContext:
         """Return MarketContext with index data sliced to <= asof.

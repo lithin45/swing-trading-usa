@@ -29,6 +29,9 @@ class SymbolData:
     insider: list[dict[str, Any]] | None = None
     short_interest: dict[str, Any] | None = None
     sector: str | None = None
+    # Precomputed indicator row at the as-of bar — the backtest fast-path sets this
+    # so factors read O(1) scalars instead of recomputing indicators every bar.
+    indicators: dict[str, Any] | None = None
     issues: list[str] = field(default_factory=list)  # data-quality problems (fail-loud)
 
     @property

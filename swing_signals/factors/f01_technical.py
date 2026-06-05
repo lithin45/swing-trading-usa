@@ -17,6 +17,8 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import pandas as pd
+
 from . import indicators as ind
 from .base import NEUTRAL, Factor, SubScore
 from .registry import register
@@ -41,6 +43,51 @@ def _clip(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
+def build_panel(df: pd.DataFrame) -> pd.DataFrame:
+    """All technical indicators as full causal series — one row per bar.
+
+    :meth:`TechnicalFactor.compute` reads a single row (the as-of bar). Every
+    indicator here is *causal* (its value at bar t depends only on bars <= t), and
+    a backtest slice shares the same first bar as the full history, so the row at
+    date d is identical whether this panel is built over the full history or over
+    the slice ending at d. A backtest therefore builds it once per symbol and
+    indexes it per bar instead of recomputing every indicator over a growing slice
+    each bar (O(n^2) -> O(n)). The equivalence is pinned by
+    ``test_precomputed_panel_matches_recompute``.
+    """
+    close, high, low, volume = df["close"], df["high"], df["low"], df["volume"]
+    adx14, plus_di, minus_di = ind.adx(high, low, close, 14)
+    _mid, bb_upper, _lower, bandwidth, _pctb = ind.bollinger(close, 20, 2.0)
+    obv = ind.obv(close, volume)
+    return pd.DataFrame(
+        {
+            "close": close,
+            "low": low,
+            "sma200": ind.sma(close, 200),
+            "sma50": ind.sma(close, 50),
+            "ema20": ind.ema(close, 20),
+            "ema50": ind.ema(close, 50),
+            "atr14": ind.atr(high, low, close, 14),
+            "rsi14": ind.rsi(close, 14),
+            "rsi2": ind.rsi(close, 2),
+            "adx14": adx14,
+            "plus_di": plus_di,
+            "minus_di": minus_di,
+            "don20h": ind.donchian_high(high, 20),
+            "don10l": ind.donchian_low(low, 10),
+            "bb_upper": bb_upper,
+            "bw_pctile": bandwidth.rolling(126).apply(
+                lambda w: float((w <= w[-1]).mean()), raw=True
+            ),
+            "rvol": ind.rvol(volume, 20),
+            "obv": obv,
+            "obv_ema": ind.ema(obv, 20),
+            "obv_rising": obv > obv.shift(1),
+            "mom6": close / close.shift(126) - 1.0,
+        }
+    )
+
+
 @register
 class TechnicalFactor(Factor):
     name = "technical"
@@ -52,34 +99,34 @@ class TechnicalFactor(Factor):
             n = 0 if df is None else len(df)
             return SubScore.unavailable(self.name, f"insufficient bars ({n} < {MIN_BARS})")
 
-        close, high, low, volume = df["close"], df["high"], df["low"], df["volume"]
-        c = float(close.iloc[-1])
-        last_low = float(low.iloc[-1])
+        # Indicator values at the as-of (last) bar. A backtest precomputes the
+        # panel once per symbol and passes the as-of row via SymbolData.indicators
+        # (O(n) instead of recomputing every indicator over a growing slice each
+        # bar); live runs build it from the slice here. Identical either way —
+        # every indicator is causal (see build_panel).
+        row = data.indicators if data.indicators is not None else build_panel(df).iloc[-1]
 
-        sma200 = float(ind.sma(close, 200).iloc[-1])
-        sma50 = float(ind.sma(close, 50).iloc[-1])
-        ema20 = float(ind.ema(close, 20).iloc[-1])
-        ema50 = float(ind.ema(close, 50).iloc[-1])
-        atr14 = float(ind.atr(high, low, close, 14).iloc[-1])
-        rsi14 = float(ind.rsi(close, 14).iloc[-1])
-        rsi2 = float(ind.rsi(close, 2).iloc[-1])
-        adx14_s, plus_di_s, minus_di_s = ind.adx(high, low, close, 14)
-        adx14 = float(adx14_s.iloc[-1])
-        plus_di = float(plus_di_s.iloc[-1])
-        minus_di = float(minus_di_s.iloc[-1])
-        don20h = float(ind.donchian_high(high, 20).iloc[-1])
-        don10l = float(ind.donchian_low(low, 10).iloc[-1])
-        _mid, bb_upper_s, _lower, bandwidth_s, _pctb = ind.bollinger(close, 20, 2.0)
-        bb_upper = float(bb_upper_s.iloc[-1])
-        bw_now = float(bandwidth_s.iloc[-1])
-        bw_window = bandwidth_s.dropna().iloc[-126:]
-        bw_pctile = float((bw_window <= bw_now).mean()) if len(bw_window) else 1.0
-        rvol_now = float(ind.rvol(volume, 20).iloc[-1])
-        obv_s = ind.obv(close, volume)
-        obv_now = float(obv_s.iloc[-1])
-        obv_ema = float(ind.ema(obv_s, 20).iloc[-1])
-        obv_rising = float(obv_s.iloc[-1]) > float(obv_s.iloc[-2])
-        mom6 = c / float(close.iloc[-127]) - 1.0  # 126 trading days
+        c = float(row["close"])
+        last_low = float(row["low"])
+        sma200 = float(row["sma200"])
+        sma50 = float(row["sma50"])
+        ema20 = float(row["ema20"])
+        ema50 = float(row["ema50"])
+        atr14 = float(row["atr14"])
+        rsi14 = float(row["rsi14"])
+        rsi2 = float(row["rsi2"])
+        adx14 = float(row["adx14"])
+        plus_di = float(row["plus_di"])
+        minus_di = float(row["minus_di"])
+        don20h = float(row["don20h"])
+        don10l = float(row["don10l"])
+        bb_upper = float(row["bb_upper"])
+        bw_pctile = float(row["bw_pctile"])
+        rvol_now = float(row["rvol"])
+        obv_now = float(row["obv"])
+        obv_ema = float(row["obv_ema"])
+        obv_rising = bool(row["obv_rising"])
+        mom6 = float(row["mom6"])
 
         # Core trend inputs must be finite, else the symbol lacks enough clean history.
         if any(math.isnan(x) for x in (sma200, ema50, atr14, mom6)):

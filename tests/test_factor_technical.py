@@ -7,7 +7,7 @@ import pandas as pd
 
 from swing_signals.context import SymbolData
 from swing_signals.factors import register_builtins
-from swing_signals.factors.f01_technical import MIN_BARS, TechnicalFactor
+from swing_signals.factors.f01_technical import MIN_BARS, TechnicalFactor, build_panel
 
 
 def _ohlcv(close_path: np.ndarray, *, vol: float = 1_000_000.0) -> pd.DataFrame:
@@ -68,3 +68,35 @@ def test_score_in_range_and_attribution_present():
 
 def test_registered_as_builtin():
     assert "technical" in register_builtins()
+
+
+def test_precomputed_panel_matches_recompute():
+    """The backtest fast-path must EXACTLY equal recomputing over the slice.
+
+    For several as-of bars, score (a) by recomputing indicators over the slice
+    ending at that bar and (b) by reading the row at that bar from a panel built
+    over the *full* history. They must be identical — proving the panel is causal
+    (no lookahead leaks from future bars) and never diverges from the live path.
+    """
+    n = 420
+    t = np.arange(n)
+    close = 50.0 + 0.2 * t + 5.0 * np.sin(t / 9.0)  # trend + deterministic wiggle
+    df = _ohlcv(close)
+    panel = build_panel(df)
+    factor = TechnicalFactor()
+
+    checked = 0
+    for i in range(MIN_BARS, n, 13):
+        sliced = df.iloc[: i + 1]
+        recompute = factor.compute(SymbolData(symbol="X", ohlcv=sliced), ctx=None)
+        precomputed = factor.compute(
+            SymbolData(symbol="X", ohlcv=sliced, indicators=panel.iloc[i].to_dict()),
+            ctx=None,
+        )
+        assert recompute.ok and precomputed.ok
+        assert precomputed.value == recompute.value, (
+            f"bar {i}: {precomputed.value} != {recompute.value}"
+        )
+        assert precomputed.reasons == recompute.reasons
+        checked += 1
+    assert checked >= 10
