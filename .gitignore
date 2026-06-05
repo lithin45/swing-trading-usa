@@ -36,8 +36,9 @@ env/
 htmlcov/
 .ipynb_checkpoints/
 
-# --- OS / editor ---
+# --- OS / editor / local tooling ---
 .DS_Store
 .idea/
 .vscode/
 *.swp
+.claude/
