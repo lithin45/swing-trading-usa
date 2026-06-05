@@ -64,6 +64,7 @@ pytest                            # should pass
 swing-signals --dry-run     # full pipeline; prints the ranked report, sends/persists nothing
 swing-signals               # live run: pull EOD data, score, persist to SQLite, alert
 swing-signals --offline     # cached data only (no network)
+swing-signals track         # resolve open signals' outcomes (realized R, MAE/MFE) vs fresh prices
 swing-signals backtest --from 2022-01-01 --to 2024-12-31   # backtest harness
 ```
 

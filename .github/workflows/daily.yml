@@ -43,6 +43,12 @@ jobs:
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_URL }}
         run: swing-signals
 
+      # Second job (file 12 §6): resolve open positions against today's prices.
+      # Meaningful once the DB persists across runs (see the archive note below);
+      # with a fresh per-run DB it finds nothing open and exits cleanly.
+      - name: Update open-signal outcomes
+        run: swing-signals track
+
       # Each runner is ephemeral, so the SQLite DB holds only today's run. Keep it
       # as a downloadable record. For cross-run history (needed by the future
       # outcome tracker), either commit signals.db back to a private repo or point
