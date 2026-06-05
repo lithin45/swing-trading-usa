@@ -41,32 +41,38 @@ signal from bad data).
 
 Built incrementally; each stage is confirmed before the next.
 
-1. **Scaffold** — package layout, config + validation, interface stubs, tests *(this stage)*
-2. Data layer (free-first: yfinance/Stooq, FRED, Finnhub, SEC EDGAR, FINRA) with cache + retries
-3. Factor modules one at a time (01 → 02 → 03 → 05 → 06), each testable in isolation
-4. Scoring engine + regime/risk gates + ATR entry/stop/target
-5. Backtest harness (realistic costs, no lookahead/survivorship bias)
-6. Alert/output layer (daily report + Telegram/email) + signal logging
-7. Scheduling (cloud, unattended)
+1. ✅ **Scaffold** — package layout, config + validation, interface stubs, tests
+2. ✅ **Data layer** (free-first: yfinance/Stooq + FRED) with Parquet cache + retries
+3. 🔶 **Factor modules** — 01 technical, 04 macro, 07 regime done; 02 news / 03 events / 05 themes / 06 smart-money still need API keys
+4. ✅ **Scoring engine** + regime/macro/risk gates + ATR entry/stop/target
+5. ✅ **Backtest harness** (realistic costs, signal-on-close → next-open, survivorship-warned)
+6. ✅ **Output + logging** — ranked report, SQLite persistence (runs/signals/outcomes), Telegram + email + failure alerts
+7. ✅ **Scheduling** — GitHub Actions daily cron + NYSE calendar gate + healthchecks.io dead-man's switch
 
 ## Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"        # scaffold deps only; add extras per stage, e.g. -e ".[dev,data]"
-pytest                          # should pass
+pip install -e ".[dev,data,db]"   # dev tooling + data layer + SQLite persistence
+pytest                            # should pass
 ```
 
-## Run (scaffold)
+## Run
 
 ```bash
-swing-signals --dry-run         # loads + validates config, prints the planned pipeline (no-op)
-# or: python -m swing_signals.cli --dry-run
+swing-signals --dry-run     # full pipeline; prints the ranked report, sends/persists nothing
+swing-signals               # live run: pull EOD data, score, persist to SQLite, alert
+swing-signals --offline     # cached data only (no network)
+swing-signals backtest --from 2022-01-01 --to 2024-12-31   # backtest harness
 ```
 
-The scaffold wires no factor logic yet — `--dry-run` validates config and prints each pipeline
-stage as a no-op so you can confirm the skeleton end to end.
+`--dry-run` runs the real pipeline (data → factors → regime/macro gates → scoring → ATR levels
++ equity sizing) and prints a ranked report, but never writes the DB or sends alerts. A live run
+persists each signal to SQLite and pushes the report to Telegram/email when configured (it falls
+back to the console otherwise). FRED/Telegram/email stay dormant until the matching `SWING_*`
+secrets are set — the run degrades loudly rather than failing. Unattended daily runs are wired in
+`.github/workflows/daily.yml` (cron + NYSE calendar gate + healthchecks.io ping).
 
 ## Configuration
 

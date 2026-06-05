@@ -1,0 +1,56 @@
+name: Daily signals
+
+# Unattended daily run (file 12 §4). Fire generously on weekdays; the in-app NYSE
+# calendar gate decides whether today is actually a trading day, so correctness
+# doesn't depend on the scheduler's precision or holiday awareness.
+on:
+  schedule:
+    # 21:30 UTC, Mon-Fri ≈ 16:30 ET in winter / 17:30 ET in summer (~1h after close).
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch: {}  # allow manual runs from the Actions tab
+
+# GitHub disables scheduled workflows after 60 days with no repo activity; a manual
+# run or any commit resets that. healthchecks.io (below) is the real dead-man's switch.
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[data,db]"
+
+      - name: Run swing-signals
+        env:
+          SWING_FRED_API_KEY: ${{ secrets.SWING_FRED_API_KEY }}
+          SWING_FINNHUB_API_KEY: ${{ secrets.SWING_FINNHUB_API_KEY }}
+          SWING_TELEGRAM_BOT_TOKEN: ${{ secrets.SWING_TELEGRAM_BOT_TOKEN }}
+          SWING_TELEGRAM_CHAT_ID: ${{ secrets.SWING_TELEGRAM_CHAT_ID }}
+          SWING_SMTP_HOST: ${{ secrets.SWING_SMTP_HOST }}
+          SWING_SMTP_PORT: ${{ secrets.SWING_SMTP_PORT }}
+          SWING_SMTP_USER: ${{ secrets.SWING_SMTP_USER }}
+          SWING_SMTP_PASSWORD: ${{ secrets.SWING_SMTP_PASSWORD }}
+          SWING_SMTP_FROM: ${{ secrets.SWING_SMTP_FROM }}
+          SWING_SMTP_TO: ${{ secrets.SWING_SMTP_TO }}
+          SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_URL }}
+        run: swing-signals
+
+      # Each runner is ephemeral, so the SQLite DB holds only today's run. Keep it
+      # as a downloadable record. For cross-run history (needed by the future
+      # outcome tracker), either commit signals.db back to a private repo or point
+      # run.db_url at an external Postgres via a DATABASE_URL secret.
+      - name: Archive signal DB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signals-db-${{ github.run_id }}
+          path: signals.db
+          if-no-files-found: ignore

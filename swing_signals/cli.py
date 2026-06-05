@@ -7,6 +7,7 @@ import sys
 
 from .config_loader import load_secrets, load_settings
 from .main import run, run_backtest
+from .output.healthcheck import ping
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,13 +83,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Default: daily run (``swing-signals`` or ``swing-signals run``).
     dry_run = args.dry_run or settings.alerts.dry_run_default
+    healthcheck_url = None if dry_run else secrets.healthcheck_url
     try:
-        return run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline)
+        rc = run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline)
     except Exception as exc:  # noqa: BLE001 - fail loud: surface + alert, never silent
         print(f"run failed: {exc}", file=sys.stderr)
         if not dry_run:
             _alert_failure(settings, secrets, str(exc))
+        ping(healthcheck_url, fail=True)
         return 1
+    ping(healthcheck_url, fail=rc != 0)
+    return rc
 
 
 if __name__ == "__main__":
