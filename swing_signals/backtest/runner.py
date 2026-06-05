@@ -12,12 +12,11 @@ logic = slicing + execution + position tracking; signal logic = unchanged code.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 import pandas as pd
 
-from ..calendar_gate import is_trading_day
 from ..config_loader import Secrets, Settings
 from ..context import MarketContext, RunContext, SymbolData
 from ..factors import register_builtins
@@ -114,7 +113,9 @@ class BacktestRunner:
         all_bars = self._all_trading_bars(start, end)
         if len(all_bars) < 2:
             log.warning("backtest: fewer than 2 trading bars in [%s, %s]", start, end)
-            return BacktestResult([], [], [], compute_metrics([], [equity_start], equity_start, 0), self.bt_cfg)
+            return BacktestResult(
+                [], [], [], compute_metrics([], [equity_start], equity_start, 0), self.bt_cfg
+            )
 
         positions: dict[str, _OpenPosition] = {}  # ticker -> open position
         trades: list[Trade] = []
@@ -135,7 +136,7 @@ class BacktestRunner:
             trading_days.append(signal_bar)
 
             # 1. Check exits on all open positions using TODAY's (signal_bar) OHLCV.
-            closed = self._check_exits(positions, signal_bar, equity)
+            closed = self._check_exits(positions, signal_bar)
             for trade in closed:
                 trades.append(trade)
                 equity += trade.pnl_dollars
@@ -252,7 +253,16 @@ class BacktestRunner:
         return result
 
     def _build_market_context(self, asof: date) -> MarketContext:
-        """Return MarketContext with index data sliced to <= asof."""
+        """Return MarketContext with index data sliced to <= asof.
+
+        VIX/VIX3M are left as ``None`` so the regime module runs its own SPY-ATR%
+        volatility proxy — the *identical* code path the live engine uses when no
+        FRED key is present, so backtest regime calls match live regime calls.
+        (Previously this synthesized a notional VIX from ATR% and fed it through
+        the VIX-level bins, a different transfer function than live. For higher
+        fidelity a future version can feed real historical VIX from FRED — VIXCLS
+        has history back to 1990 — sliced per bar.)
+        """
         def _s(sym: str) -> pd.DataFrame | None:
             df = self.index_ohlcv.get(sym)
             if df is None:
@@ -260,20 +270,10 @@ class BacktestRunner:
             sl = _slice_to(df, asof)
             return sl if len(sl) >= self.bt_cfg.warmup_bars else None
 
-        spy = _s("SPY")
-        # Approximate VIX from SPY ATR% when no FRED key (same as live degraded path).
-        vix = None
-        if spy is not None and len(spy) >= 14:
-            from ..factors import indicators as ind
-            atr14 = float(ind.atr(spy["high"], spy["low"], spy["close"], 14).iloc[-1])
-            atr_pct = atr14 / float(spy["close"].iloc[-1]) * 100.0
-            # Convert ATR% back to a notional VIX for the regime module.
-            vix = max(10.0, atr_pct * 10.0)
-
-        return MarketContext(spy=spy, qqq=_s("QQQ"), iwm=_s("IWM"), vix=vix)
+        return MarketContext(spy=_s("SPY"), qqq=_s("QQQ"), iwm=_s("IWM"))
 
     def _check_exits(
-        self, positions: dict[str, _OpenPosition], bar: date, equity: float
+        self, positions: dict[str, _OpenPosition], bar: date
     ) -> list[Trade]:
         """Check stop, target, and time-stop for every open position."""
         closed: list[Trade] = []
@@ -312,9 +312,18 @@ class BacktestRunner:
         return closed
 
     def _mtm(self, positions: dict[str, _OpenPosition], bar: date) -> float:
-        """Mark-to-market unrealised P&L of all open positions at bar close."""
+        """Mark-to-market unrealised P&L of all open positions at bar close.
+
+        A position opened on this bar fills at the NEXT bar's open, so it is not
+        yet held at this close — skip it (``bars_open == 0``) so it is not marked
+        against its future fill price. That was a 1-bar lookahead in the equity
+        curve, distorting Sharpe/Sortino/drawdown (the R-based trade metrics were
+        unaffected, since they use the real entry_fill).
+        """
         total = 0.0
         for ticker, pos in positions.items():
+            if pos.bars_open <= 0:
+                continue
             ohlcv = self.ohlcv_all.get(ticker)
             if ohlcv is None:
                 continue
@@ -330,20 +339,31 @@ class BacktestRunner:
 # ------------------------------------------------------------------
 
 def _slice_to(df: pd.DataFrame, asof: date) -> pd.DataFrame:
-    """Return rows whose DatetimeIndex date <= asof (no lookahead)."""
-    mask = pd.Series(df.index).apply(
-        lambda ts: (ts.date() if hasattr(ts, "date") else date.fromisoformat(str(ts)[:10])) <= asof
-    ).values
-    return df.iloc[mask]
+    """Return rows whose DatetimeIndex date <= asof (no lookahead).
+
+    Vectorized: the index is a normalized (midnight) DatetimeIndex, so a single
+    boolean comparison against ``Timestamp(asof)`` keeps every bar on/through the
+    as-of date and drops the future. (Previously a per-row Python ``.apply`` —
+    O(bars) interpreted calls per symbol per day, which dominated backtest time.)
+    """
+    return df[df.index <= pd.Timestamp(asof)]
 
 
 def _bar_at(df: pd.DataFrame, d: date) -> pd.Series | None:
-    """Return the row for date ``d``, or None if not present."""
-    for ts in df.index:
-        ts_date = ts.date() if hasattr(ts, "date") else date.fromisoformat(str(ts)[:10])
-        if ts_date == d:
-            return df.loc[ts]
-    return None
+    """Return the row for date ``d``, or None if not present.
+
+    O(1) hashed index lookup (was a linear scan over the whole index).
+    """
+    ts = pd.Timestamp(d)
+    try:
+        row = df.loc[ts]
+    except KeyError:
+        return None
+    # normalize_ohlcv de-dups the index, but stay defensive: a duplicate date
+    # would yield a DataFrame here — take the last bar for that date.
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[-1]
+    return row
 
 
 def _make_trade(pos: _OpenPosition, exit_date: date, exit_fill: float, reason: str) -> Trade:
@@ -364,7 +384,12 @@ def _make_trade(pos: _OpenPosition, exit_date: date, exit_fill: float, reason: s
 
 
 def _clone_settings_with_equity(settings: Settings, equity: float) -> Settings:
-    """Return a copy of settings with account.equity updated to the current BT equity."""
-    raw = settings.model_dump()
-    raw["account"]["equity"] = equity
-    return Settings(**raw)
+    """Return a copy of settings with account.equity updated to the current BT equity.
+
+    Uses ``model_copy`` (a plain deep copy, no validation) rather than
+    ``model_dump()`` + ``Settings(**raw)``, which re-ran every Pydantic validator
+    over the whole config tree once per trading day.
+    """
+    clone = settings.model_copy(deep=True)
+    clone.account.equity = equity
+    return clone

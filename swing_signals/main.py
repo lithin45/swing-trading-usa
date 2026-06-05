@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from .calendar_gate import is_early_close, is_holiday_aware, is_trading_day
+from .calendar_gate import is_early_close, is_trading_day
 from .config_loader import Secrets, Settings, load_secrets, load_settings
 from .context import RunContext
 from .data.loader import DataLoader
@@ -60,7 +60,6 @@ def run(
         return 0
     if is_early_close(today):
         log.info("%s is an NYSE half-day (early close)", today)
-    assert is_holiday_aware()
 
     # Stage 2 — data layer.
     loader = loader if loader is not None else DataLoader(settings, secrets)
