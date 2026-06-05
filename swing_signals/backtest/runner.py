@@ -21,6 +21,7 @@ from ..config_loader import Secrets, Settings
 from ..context import MarketContext, RunContext, SymbolData
 from ..factors import register_builtins
 from ..factors.f01_technical import build_panel
+from ..market.f04_macro import MacroModule
 from ..market.f07_regime import RegimeModule
 from ..scoring.engine import generate_signals
 from .config import BacktestCfg
@@ -157,7 +158,10 @@ class BacktestRunner:
 
             # 3. Generate signals — the live function, no modifications.
             regime = RegimeModule().compute(ctx)
-            result = generate_signals(symbol_data, ctx, regime)
+            macro = MacroModule().compute(ctx)
+            result = generate_signals(
+                symbol_data, ctx, regime, macro_multiplier=macro.multiplier
+            )
             n_signals += len(result.actionable)
             n_no_trades += len(result.no_trades)
 

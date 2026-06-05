@@ -13,6 +13,7 @@ from .config_loader import Secrets, Settings, load_secrets, load_settings
 from .context import RunContext
 from .data.loader import DataLoader
 from .factors import register_builtins
+from .market.f04_macro import MacroModule
 from .market.f07_regime import RegimeModule
 from .output.base import ConsoleAlerter
 from .output.report import format_report
@@ -92,6 +93,9 @@ def run(
     regime = RegimeModule().compute(ctx)
     log.info("regime gate: %s (score %s, size x%s, veto=%s)",
              regime.state, regime.score, regime.multiplier, regime.veto)
+    macro = MacroModule().compute(ctx)
+    log.info("macro modifier: %s (score %s, size x%s)",
+             macro.state, macro.score, macro.multiplier)
 
     active = settings.active_factor_weights()
     registered = sorted(register_builtins())
@@ -101,11 +105,11 @@ def run(
     if missing:
         log.info("factors awaiting later stages/keys (excluded from composite): %s", missing)
 
-    result = generate_signals(data, ctx, regime)
+    result = generate_signals(data, ctx, regime, macro_multiplier=macro.multiplier)
     log.info("signals: %d actionable LONG, %d no-trade",
              len(result.actionable), len(result.no_trades))
 
-    report = format_report(result, settings=settings, today=today, regime=regime)
+    report = format_report(result, settings=settings, today=today, regime=regime, macro=macro)
     if dry_run:
         ConsoleAlerter().send(subject=f"swing-signals {today}", body=report)
     else:
