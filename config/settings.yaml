@@ -91,3 +91,15 @@ alerts:
 run:
   output_dir: output
   log_level: INFO
+
+# Stage 5 backtest parameters (file 11).
+# cost_bps: per-side spread+slippage in basis points ($0 commission for US equities).
+# max_hold_bars: time-stop — close a position after this many trading days.
+# warmup_bars: bars of history required before the first signal (SMA-200 needs ~200).
+backtest:
+  start: "2022-01-01"
+  end: "2024-12-31"
+  cost_bps: 10.0
+  max_hold_bars: 20
+  warmup_bars: 210
+  equity_start: 500.0

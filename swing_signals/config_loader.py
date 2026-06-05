@@ -9,7 +9,7 @@ environment / ``.env`` (never the YAML) via :class:`Secrets`.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import (
@@ -162,6 +162,9 @@ class Settings(StrictModel):
     data: DataCfg
     alerts: AlertsCfg
     run: RunCfg
+    # Backtest config is optional — old configs without a `backtest:` section still load.
+    # Stored as a raw dict and parsed by run_backtest() to avoid a circular import.
+    backtest: dict[str, Any] | None = None
 
     @field_validator("factors")
     @classmethod

@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from .config_loader import load_secrets, load_settings
-from .main import run
+from .main import run, run_backtest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,23 +17,38 @@ def build_parser() -> argparse.ArgumentParser:
             "Decision support — never places orders."
         ),
     )
-    p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Run the pipeline without sending alerts; print them to the console instead.",
-    )
-    p.add_argument(
-        "--offline",
-        action="store_true",
-        help="Use cached data only; never hit the network (deterministic local run).",
-    )
-    p.add_argument(
-        "--config",
-        default=None,
-        metavar="PATH",
-        help="Path to settings.yaml (default: config/settings.yaml).",
-    )
+    sub = p.add_subparsers(dest="command")
+
+    # ---- default (daily run) ----
+    run_p = sub.add_parser("run", help="Daily signal run (default when no subcommand given)")
+    _add_run_flags(run_p)
+
+    # ---- backtest ----
+    bt_p = sub.add_parser("backtest", help="Run the Stage-5 backtest harness")
+    bt_p.add_argument("--from", dest="bt_from", metavar="YYYY-MM-DD",
+                      help="Backtest start date (overrides config)")
+    bt_p.add_argument("--to", dest="bt_to", metavar="YYYY-MM-DD",
+                      help="Backtest end date (overrides config)")
+    bt_p.add_argument("--cost-bps", type=float, metavar="N",
+                      help="Per-side cost in basis points (overrides config, default 10)")
+    bt_p.add_argument("--walk-forward", type=int, default=0, metavar="N_FOLDS",
+                      help="Number of rolling walk-forward folds (0 = disabled)")
+    bt_p.add_argument("--offline", action="store_true",
+                      help="Use cached data only; never hit the network.")
+    bt_p.add_argument("--config", default=None, metavar="PATH")
+
+    # Also attach run flags to top-level for backwards compat (no subcommand).
+    _add_run_flags(p)
+
     return p
+
+
+def _add_run_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--dry-run", action="store_true",
+                   help="Print alerts instead of sending; no-op write.")
+    p.add_argument("--offline", action="store_true",
+                   help="Use cached data only; never hit the network.")
+    p.add_argument("--config", default=None, metavar="PATH")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,9 +56,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = load_settings(args.config)
         secrets = load_secrets()
-    except Exception as exc:  # noqa: BLE001 - fail fast with a clear message
+    except Exception as exc:  # noqa: BLE001
         print(f"config error: {exc}", file=sys.stderr)
         return 2
+
+    if args.command == "backtest":
+        return run_backtest(
+            settings=settings,
+            secrets=secrets,
+            bt_start=args.bt_from,
+            bt_end=args.bt_to,
+            cost_bps=args.cost_bps,
+            walk_forward_folds=args.walk_forward,
+            offline=args.offline,
+        )
+
+    # Default: daily run (``swing-signals`` or ``swing-signals run``).
     dry_run = args.dry_run or settings.alerts.dry_run_default
     return run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline)
 
