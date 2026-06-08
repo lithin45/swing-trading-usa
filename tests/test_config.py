@@ -8,9 +8,12 @@ from pydantic import ValidationError
 
 from swing_signals.config_loader import (
     DEFAULT_SETTINGS_PATH,
+    Secrets,
     Settings,
+    _normalize_db_url,
     load_secrets,
     load_settings,
+    resolve_db_url,
 )
 
 
@@ -78,3 +81,65 @@ def test_tier_order_validation():
     raw["scoring"]["tier_medium"] = 70.0
     with pytest.raises(ValidationError):
         Settings(**raw)
+
+
+# --- broker config (Stage 8) ---------------------------------------------------
+
+def test_broker_config_loads_disabled_by_default():
+    s = load_settings()
+    assert s.broker is not None
+    assert s.broker.enabled is False  # signal-only until explicitly enabled
+    assert s.broker.paper is True
+    assert s.broker.entry_price_ref == "zone_high"
+
+
+def test_broker_section_optional():
+    raw = _raw()
+    raw.pop("broker", None)  # old configs without a broker: block still load
+    s = Settings(**raw)
+    assert s.broker is None
+
+
+def test_broker_bad_provider_raises():
+    raw = _raw()
+    raw["broker"]["provider"] = "robinhood"  # only alpaca supported
+    with pytest.raises(ValidationError):
+        Settings(**raw)
+
+
+# --- DB URL resolution + normalization (Neon/Postgres) -------------------------
+
+def test_resolve_db_url_defaults_to_yaml(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SWING_DATABASE_URL", raising=False)
+    s = load_settings()
+    assert resolve_db_url(s) == s.run.db_url  # sqlite default, untouched
+
+
+def test_resolve_db_url_bare_env_wins_and_normalizes(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgres://u:p@host/db")
+    s = load_settings()
+    out = resolve_db_url(s)
+    assert out == "postgresql+psycopg://u:p@host/db?sslmode=require"
+
+
+def test_resolve_db_url_swing_env_fallback(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SWING_DATABASE_URL", "postgresql://u:p@host/db?sslmode=require")
+    s = load_settings()
+    # already psycopg-less postgresql:// -> driver added, existing sslmode preserved (not doubled)
+    assert resolve_db_url(s) == "postgresql+psycopg://u:p@host/db?sslmode=require"
+
+
+def test_resolve_db_url_secrets_only_when_passed(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SWING_DATABASE_URL", raising=False)
+    s = load_settings()
+    sec = Secrets(database_url="postgres://x/y")
+    assert resolve_db_url(s, sec).startswith("postgresql+psycopg://x/y")
+    # without secrets, the same call stays on the yaml default (hermetic for tests)
+    assert resolve_db_url(s) == s.run.db_url
+
+
+def test_normalize_leaves_sqlite_untouched():
+    assert _normalize_db_url("sqlite:///signals.db") == "sqlite:///signals.db"

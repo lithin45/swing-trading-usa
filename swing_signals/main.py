@@ -35,9 +35,10 @@ def configure_logging(level: str) -> None:
     )
 
 
-def _persist(settings: Settings, today: date, result) -> None:
+def _persist(settings: Settings, today: date, result, secrets: Secrets | None = None) -> None:
     """Best-effort write of the run + its signals to the DB (never fails the run)."""
     try:
+        from .config_loader import resolve_db_url
         from .persistence.repository import persist_daily_run
     except ImportError:
         log.warning(
@@ -46,8 +47,8 @@ def _persist(settings: Settings, today: date, result) -> None:
         )
         return
     try:
-        n = persist_daily_run(settings, today, result.actionable)
-        log.info("persisted %d signal(s) to %s", n, settings.run.db_url)
+        n = persist_daily_run(settings, today, result.actionable, secrets=secrets)
+        log.info("persisted %d signal(s) to %s", n, resolve_db_url(settings, secrets))
     except Exception as exc:  # noqa: BLE001 - a DB error must not fail the signal run
         log.warning("persistence failed (continuing): %s", exc)
 
@@ -149,7 +150,7 @@ def run(
     else:
         _dispatch_report(settings, secrets, subject=f"swing-signals {today}", body=report)
         if settings.run.persist:
-            _persist(settings, today, result)
+            _persist(settings, today, result, secrets=secrets)
 
     log.info("next stages:")
     for stage in NEXT_STAGES:

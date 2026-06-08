@@ -125,6 +125,7 @@ def run_tracker(
     loader: DataLoader | None = None,
 ) -> int:
     """Resolve every open signal in the DB against fresh prices. Returns exit code."""
+    from ..config_loader import resolve_db_url
     from ..data.loader import DataLoader
     from ..persistence.db import make_engine, session_scope
     from ..persistence.repository import open_signals, upsert_outcome
@@ -138,7 +139,7 @@ def run_tracker(
     resolved = closed = still_open = 0
     ohlcv_cache: dict[str, pd.DataFrame | None] = {}
 
-    with session_scope(make_engine(settings.run.db_url)) as session:
+    with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
         opens = open_signals(session)
         log.info("tracker: %d open signal(s) to resolve", len(opens))
         for sig in opens:

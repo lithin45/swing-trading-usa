@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from .models import Outcome, Run, Signal
 
 if TYPE_CHECKING:
-    from ..config_loader import Settings
+    from ..config_loader import Secrets, Settings
     from ..scoring.engine import Signal as EngineSignal
 
 
@@ -128,13 +128,19 @@ def persist_daily_run(
     *,
     status: str = "success",
     error: str | None = None,
+    secrets: Secrets | None = None,
 ) -> int:
-    """Open the configured DB, write a run row + its signals, return signals inserted."""
+    """Open the configured DB, write a run row + its signals, return signals inserted.
+
+    Passing ``secrets`` lets a local ``.env`` ``SWING_DATABASE_URL`` redirect to Postgres; tests
+    that omit it stay on ``settings.run.db_url`` (their temp SQLite).
+    """
+    from ..config_loader import resolve_db_url
     from .db import make_engine, session_scope
 
     run_ts = datetime.now()
     provider = settings.data.provider_order[0] if settings.data.provider_order else None
-    with session_scope(make_engine(settings.run.db_url)) as session:
+    with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
         run = create_run(
             session, run_ts=run_ts, trading_day=trading_day, status=status,
             data_provider=provider, git_sha=_git_sha(), config_hash=_config_hash(settings),

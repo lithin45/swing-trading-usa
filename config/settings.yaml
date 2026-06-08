@@ -72,7 +72,7 @@ universe:
   min_dollar_volume: 10_000_000     # $10M average daily dollar volume
 
 data:
-  provider_order: [yfinance, stooq] # first that succeeds wins (stooq needs a key)
+  provider_order: [alpaca, yfinance, stooq] # first that succeeds wins; alpaca/stooq need keys
   cache_dir: .cache
   lookback_days: 400                # enough for 200-DMA + ATR warmup
   max_staleness_days: 4             # data older than this → skip the stock (fail-loud)
@@ -91,8 +91,26 @@ alerts:
 run:
   output_dir: output
   log_level: INFO
-  db_url: "sqlite:///signals.db"   # signal/outcome/run log (gitignored; Postgres-ready via URL)
+  db_url: "sqlite:///signals.db"   # local default; env DATABASE_URL (Neon) overrides in CI/cloud
   persist: true                    # persist each real run's signals (dry-run never writes)
+
+# Stage 8 — automated Alpaca PAPER trading (opt-in). Disabled by default so the system stays
+# signal-only until you add Alpaca keys and flip `enabled: true`. At ~$500 equity positions are
+# fractional, so exits are managed by the `manage` job (Alpaca forbids brackets on fractional).
+broker:
+  enabled: false
+  provider: alpaca
+  paper: true                      # paper trading only — never a live brokerage account
+  entry_order_type: limit          # limit at the top of the pullback zone
+  entry_price_ref: zone_high       # entry_zone_high (the pullback ceiling)
+  tif: day                         # fractional requires DAY time-in-force
+  max_pending_days: 3              # cancel / market-fallback after N sessions unfilled
+  market_fallback: true            # market order if the limit never fills
+  entry_reprice_each_day: true     # re-place the DAY limit each session until filled/aged
+  place_protective_stops: true     # standalone STOP-DAY each session (intraday safety net)
+  max_hold_bars: 20                # time-stop (trading days), aligned with backtest
+  whole_share_only: false          # honor account.fractional_shares
+  min_order_usd: 1.0               # Alpaca fractional minimum
 
 # Stage 5 backtest parameters (file 11).
 # cost_bps: per-side spread+slippage in basis points ($0 commission for US equities).

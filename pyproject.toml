@@ -40,10 +40,18 @@ softdata = [
 #  pandas-ta/TA-Lib dependency, which also avoids their NumPy-2/py3.14 breakage.)
 # Persistence
 db = ["sqlalchemy>=2.0"]
+# Hosted Postgres (Neon/Supabase) for cross-run history + the dashboard
+postgres = ["psycopg[binary]>=3.1"]
 # Stage 6 — alerting
 alerts = ["python-telegram-bot>=21.0"]
 # Stage 5 — backtest/validation
 backtest = ["vectorbt>=0.26", "alphalens-reloaded>=0.4"]
+# Stage 8 — automated Alpaca paper trading
+broker = ["alpaca-py>=0.20"]
+# Stage 8 — Claude-powered news factor + daily brief
+ai = ["anthropic>=0.39"]
+# Stage 8 — online tracking dashboard (deployed separately on Streamlit Cloud)
+dashboard = ["streamlit>=1.36", "plotly>=5.22"]
 # Developer tooling
 dev = [
     "pytest>=8.0",

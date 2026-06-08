@@ -8,6 +8,7 @@ environment / ``.env`` (never the YAML) via :class:`Secrets`.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -150,6 +151,30 @@ class RunCfg(StrictModel):
     persist: bool = True
 
 
+class BrokerCfg(StrictModel):
+    """Automated paper-trading execution (opt-in; default off keeps the signal-only behavior).
+
+    Sized at ~$500 equity with mega-caps means positions are *fractional*, and Alpaca forbids
+    bracket/OCO on fractional orders (TIF must be DAY). So exits are managed by the ``manage``
+    job rather than server-side brackets; ``place_protective_stops`` adds a standalone STOP-DAY
+    order per session as an intraday safety net.
+    """
+
+    enabled: bool = False
+    provider: Literal["alpaca"] = "alpaca"
+    paper: bool = True  # paper trading only — the bot never touches a live brokerage account
+    entry_order_type: Literal["limit", "market"] = "limit"
+    entry_price_ref: Literal["zone_high", "zone_low", "reference"] = "zone_high"
+    tif: Literal["day"] = "day"  # fractional orders require DAY time-in-force
+    max_pending_days: int = Field(default=3, ge=1, le=30)
+    market_fallback: bool = True  # market order if the limit never fills within max_pending_days
+    entry_reprice_each_day: bool = True  # re-place the DAY limit each session until filled/aged
+    place_protective_stops: bool = True  # standalone STOP-DAY per session (emulated OCO)
+    max_hold_bars: int = Field(default=20, ge=1)  # time-stop (defaults align with backtest)
+    whole_share_only: bool = False  # honor account.fractional_shares by default
+    min_order_usd: float = Field(default=1.0, ge=1.0)  # Alpaca fractional minimum
+
+
 class Settings(StrictModel):
     """Top-level validated configuration."""
 
@@ -164,6 +189,9 @@ class Settings(StrictModel):
     data: DataCfg
     alerts: AlertsCfg
     run: RunCfg
+    # Broker config is optional — old configs without a `broker:` section still load, and
+    # `broker is None or not broker.enabled` means signal-only (the current behavior).
+    broker: BrokerCfg | None = None
     # Backtest config is optional — old configs without a `backtest:` section still load.
     # Stored as a raw dict and parsed by run_backtest() to avoid a circular import.
     backtest: dict[str, Any] | None = None
@@ -221,6 +249,16 @@ class Secrets(BaseSettings):
     smtp_from: str | None = None
     smtp_to: str | None = None
     healthcheck_url: str | None = None
+    # --- Stage 8+ : automated paper trading + AI + cloud persistence (all optional) ---
+    alpaca_api_key: SecretStr | None = None
+    alpaca_secret_key: SecretStr | None = None
+    anthropic_api_key: SecretStr | None = None
+    alphavantage_api_key: SecretStr | None = None
+    # Neon/hosted Postgres for the dashboard + cross-run history. Read with the SWING_ prefix
+    # from .env; CI/Streamlit conventionally inject a *bare* DATABASE_URL — resolve_db_url()
+    # checks both. Plain str (it's a connection URL, not a single secret token).
+    database_url: str | None = None
+    dashboard_password: SecretStr | None = None
 
 
 def load_settings(path: str | Path | None = None) -> Settings:
@@ -238,3 +276,36 @@ def load_settings(path: str | Path | None = None) -> Settings:
 def load_secrets() -> Secrets:
     """Load secrets from environment / .env (never from the YAML)."""
     return Secrets()
+
+
+def _normalize_db_url(url: str) -> str:
+    """Make a connection URL SQLAlchemy-ready.
+
+    Hosted Postgres providers (Neon, Supabase) hand out ``postgres://`` / ``postgresql://``
+    URLs; SQLAlchemy 2.x needs an explicit driver, so we pin psycopg 3 and require TLS (Neon
+    rejects non-TLS). SQLite and already-driver-qualified URLs pass through untouched.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://") :]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://") :]
+    if url.startswith("postgresql+psycopg://") and "sslmode=" not in url:
+        url = f"{url}{'&' if '?' in url else '?'}sslmode=require"
+    return url
+
+
+def resolve_db_url(settings: Settings, secrets: Secrets | None = None) -> str:
+    """Resolve the effective DB URL with env > secrets(.env) > yaml precedence.
+
+    Order: a *bare* ``DATABASE_URL`` env var (CI / Streamlit Cloud), then ``SWING_DATABASE_URL``
+    env, then ``secrets.database_url`` (local ``.env``, only when ``secrets`` is passed), finally
+    ``settings.run.db_url`` (yaml; SQLite by default). ``secrets`` is opt-in so test calls that
+    pass only ``settings`` stay hermetic on their own SQLite file regardless of the dev's ``.env``.
+    """
+    url = (
+        os.environ.get("DATABASE_URL")
+        or os.environ.get("SWING_DATABASE_URL")
+        or (secrets.database_url if secrets is not None else None)
+        or settings.run.db_url
+    )
+    return _normalize_db_url(url)
