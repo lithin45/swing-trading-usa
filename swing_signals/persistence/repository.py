@@ -17,7 +17,16 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Outcome, Run, Signal
+from .models import (
+    AccountSnapshot,
+    Brief,
+    NewsItem,
+    NewsScore,
+    Outcome,
+    Run,
+    Signal,
+    Trade,
+)
 
 if TYPE_CHECKING:
     from ..config_loader import Secrets, Settings
@@ -161,3 +170,169 @@ def _git_sha() -> str | None:
 
 def _config_hash(settings: Settings) -> str:
     return hashlib.sha256(settings.model_dump_json().encode("utf-8")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Stage 8 — trades / snapshots / news / briefs (broker + AI + dashboard).
+# Same idempotent, session-scoped style as the signal/outcome helpers above.
+# ---------------------------------------------------------------------------
+
+
+def get_signals_for_day(
+    session: Session, day: date, *, direction: str | None = "long"
+) -> list[Signal]:
+    """The persisted signals for one trading day (what the broker acts on)."""
+    stmt = select(Signal).where(Signal.signal_date == day)
+    if direction is not None:
+        stmt = stmt.where(Signal.direction == direction)
+    return list(session.scalars(stmt.order_by(Signal.rank)))
+
+
+def get_trade(session: Session, signal_date: date, symbol: str) -> Trade | None:
+    return session.scalar(
+        select(Trade).where(Trade.signal_date == signal_date, Trade.symbol == symbol)
+    )
+
+
+def upsert_trade(
+    session: Session, *, signal_date: date, symbol: str, now: datetime, **fields: Any
+) -> Trade:
+    """Create or update the trade for ``(signal_date, symbol)`` — idempotent on the unique key."""
+    trade = get_trade(session, signal_date, symbol)
+    if trade is None:
+        trade = Trade(
+            signal_date=signal_date, symbol=symbol, created_at=now, updated_at=now, **fields
+        )
+        session.add(trade)
+    else:
+        for key, value in fields.items():
+            setattr(trade, key, value)
+        trade.updated_at = now
+    session.flush()
+    return trade
+
+
+def _trades_with_status(session: Session, statuses: list[str]) -> list[Trade]:
+    return list(session.scalars(select(Trade).where(Trade.status.in_(statuses))))
+
+
+def active_trades(session: Session) -> list[Trade]:
+    """Every trade still in flight (anything not closed/canceled) — the manage loop's worklist."""
+    return list(
+        session.scalars(select(Trade).where(Trade.status.notin_(["closed", "canceled"])))
+    )
+
+
+def open_trades(session: Session) -> list[Trade]:
+    return _trades_with_status(session, ["open"])
+
+
+def pending_entry_trades(session: Session) -> list[Trade]:
+    return _trades_with_status(session, ["pending_entry"])
+
+
+def closing_trades(session: Session) -> list[Trade]:
+    return _trades_with_status(session, ["closing"])
+
+
+def closed_trades(session: Session) -> list[Trade]:
+    return list(
+        session.scalars(select(Trade).where(Trade.status == "closed").order_by(Trade.exit_date))
+    )
+
+
+def add_account_snapshot(
+    session: Session,
+    *,
+    ts: datetime,
+    equity: float,
+    trading_day: date | None = None,
+    cash: float | None = None,
+    buying_power: float | None = None,
+    open_positions: int = 0,
+    open_risk_pct: float | None = None,
+) -> AccountSnapshot:
+    snap = AccountSnapshot(
+        ts=ts, trading_day=trading_day, equity=equity, cash=cash, buying_power=buying_power,
+        open_positions=open_positions, open_risk_pct=open_risk_pct,
+    )
+    session.add(snap)
+    return snap
+
+
+def list_snapshots(session: Session) -> list[AccountSnapshot]:
+    return list(session.scalars(select(AccountSnapshot).order_by(AccountSnapshot.ts)))
+
+
+def upsert_news_items(
+    session: Session, items: list[dict[str, Any]], *, fetched_at: datetime
+) -> int:
+    """Insert news rows not already cached on ``(symbol, url)``; return the inserted count."""
+    inserted = 0
+    for it in items:
+        symbol = it.get("symbol")
+        url = (it.get("url") or "")[:512]
+        if not symbol or not url:
+            continue
+        existing = session.scalar(
+            select(NewsItem).where(NewsItem.symbol == symbol, NewsItem.url == url)
+        )
+        if existing is not None:
+            continue
+        session.add(NewsItem(
+            symbol=symbol, headline=(it.get("headline") or "")[:2000],
+            summary=it.get("summary"), url=url, source=it.get("source"),
+            published_at=it.get("published_at"), sentiment_hint=it.get("sentiment_hint"),
+            fetched_at=fetched_at,
+        ))
+        inserted += 1
+    return inserted
+
+
+def get_cached_news(
+    session: Session, symbol: str, *, since: datetime | None = None
+) -> list[NewsItem]:
+    stmt = select(NewsItem).where(NewsItem.symbol == symbol)
+    if since is not None:
+        stmt = stmt.where(NewsItem.published_at >= since)
+    return list(session.scalars(stmt.order_by(NewsItem.published_at.desc())))
+
+
+def get_news_score(session: Session, score_key: str) -> NewsScore | None:
+    return session.scalar(select(NewsScore).where(NewsScore.score_key == score_key))
+
+
+def save_news_score(
+    session: Session, *, score_key: str, symbol: str, value: float, created_at: datetime,
+    trading_day: date | None = None, catalyst: str | None = None, rationale: str | None = None,
+    model: str | None = None, prompt_version: str | None = None, items_considered: int = 0,
+) -> NewsScore:
+    """Persist a Claude news score; a no-op returning the existing row if the key is present."""
+    row = get_news_score(session, score_key)
+    if row is not None:
+        return row
+    row = NewsScore(
+        score_key=score_key, symbol=symbol, value=value, created_at=created_at,
+        trading_day=trading_day, catalyst=catalyst, rationale=rationale, model=model,
+        prompt_version=prompt_version, items_considered=items_considered,
+    )
+    session.add(row)
+    return row
+
+
+def get_brief(session: Session, trading_day: date) -> Brief | None:
+    return session.scalar(select(Brief).where(Brief.trading_day == trading_day))
+
+
+def upsert_brief(
+    session: Session, *, trading_day: date, text: str, created_at: datetime,
+    model: str | None = None,
+) -> Brief:
+    row = get_brief(session, trading_day)
+    if row is None:
+        row = Brief(trading_day=trading_day, text=text, model=model, created_at=created_at)
+        session.add(row)
+    else:
+        row.text = text
+        row.model = model
+    return row
