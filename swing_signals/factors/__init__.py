@@ -14,7 +14,10 @@ def register_builtins() -> dict[str, type]:
     Importing each ``f0x_*`` module triggers its ``@register`` decorator. Called by
     the orchestrator at startup; adding a new factor means adding one import here.
     """
-    from . import f01_technical  # noqa: F401  (self-registers on import)
+    from . import (
+        f01_technical,  # noqa: F401  (self-registers on import)
+        f02_news_sentiment,  # noqa: F401  (self-disables without a key/news)
+    )
     from .registry import all_factors
 
     return all_factors()

@@ -53,6 +53,22 @@ def _persist(settings: Settings, today: date, result, secrets: Secrets | None = 
         log.warning("persistence failed (continuing): %s", exc)
 
 
+def _maybe_brief(settings: Settings, secrets: Secrets, today: date, regime, macro, result) -> None:
+    """Best-effort daily AI brief (key-gated, never fails the run; no-op without a key)."""
+    if not secrets.anthropic_api_key:
+        return
+    try:
+        from .ai.brief import generate_brief
+
+        text = generate_brief(
+            settings, secrets, today=today, regime=regime, macro=macro, result=result
+        )
+        if text:
+            log.info("AI brief generated (%d chars)", len(text))
+    except Exception as exc:  # noqa: BLE001 - the brief must never fail the signal run
+        log.warning("AI brief failed (continuing): %s", exc)
+
+
 def _dispatch_report(settings: Settings, secrets: Secrets, *, subject: str, body: str) -> None:
     """Send the daily report to all configured channels; console fallback if none/all fail."""
     from .output.dispatch import build_alerters, dispatch
@@ -151,6 +167,7 @@ def run(
         _dispatch_report(settings, secrets, subject=f"swing-signals {today}", body=report)
         if settings.run.persist:
             _persist(settings, today, result, secrets=secrets)
+        _maybe_brief(settings, secrets, today, regime, macro, result)
 
     log.info("next stages:")
     for stage in NEXT_STAGES:
