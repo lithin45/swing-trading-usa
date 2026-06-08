@@ -44,6 +44,7 @@ def loader(tmp_path):
     settings.data.cache_dir = str(tmp_path)
     ldr = DataLoader(settings, load_secrets())
     ldr.cache.dir = tmp_path  # ensure isolation
+    ldr.news_providers = []   # never hit live news APIs in unit tests
     return ldr
 
 

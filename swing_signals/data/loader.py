@@ -34,6 +34,7 @@ class DataLoader:
         self.cache = OHLCVCache(settings.data.cache_dir)
         self.providers = self._build_price_providers()
         self.fred = FredProvider(_reveal(secrets.fred_api_key))
+        self.news_providers = self._build_news_providers()
 
     # -- construction -------------------------------------------------------
     def _build_price_providers(self) -> list:
@@ -60,6 +61,18 @@ class DataLoader:
                 log.warning("unknown price provider %r in provider_order; skipping", name)
         if not providers:
             raise ValueError("no usable price providers configured (check provider_order/keys)")
+        return providers
+
+    def _build_news_providers(self) -> list:
+        """News hydration is opt-in: only when news_sentiment is active AND a key is present."""
+        fc = self.settings.factors.get("news_sentiment")
+        if not (fc and fc.enabled and fc.weight > 0):
+            return []
+        from ..news.aggregate import build_providers
+
+        providers = build_providers(self.secrets)
+        if providers:
+            log.info("news hydration enabled: %s", [p.name for p in providers])
         return providers
 
     def _min_rows(self) -> int:
@@ -121,6 +134,16 @@ class DataLoader:
                 max_staleness_days=self.settings.data.max_staleness_days,
             )
         )
+        # Opt-in news hydration (live only). Non-essential: a failure must never
+        # fail the symbol's data gate — leave news=None and let the factor degrade.
+        if self.news_providers and sd.ok and not offline:
+            try:
+                from ..news.aggregate import fetch_news
+
+                items = fetch_news(symbol, asof, providers=self.news_providers)
+                sd.news = [it.as_dict() for it in items]
+            except Exception as exc:  # noqa: BLE001 - news is best-effort
+                log.warning("news fetch failed for %s (continuing): %s", symbol, exc)
         return sd
 
     def load_watchlist(
