@@ -50,3 +50,34 @@ def run_trade(
         log.error("trade run failed: %s", exc)
         return 1
     return 0
+
+
+def run_manage(
+    settings: Settings,
+    secrets: Secrets,
+    *,
+    today: date | None = None,
+    dry_run: bool = False,
+    offline: bool = False,
+) -> int:
+    """Reconcile fills + manage exits for open paper trades (paper)."""
+    from ..main import configure_logging
+    from .manage import reconcile_and_manage
+
+    configure_logging(settings.run.log_level)
+    today = today or date.today()
+    if not _broker_enabled(settings):
+        log.info("broker disabled (settings.broker.enabled=false); skipping manage")
+        return 0
+    if not is_trading_day(today):
+        log.info("%s is not an NYSE trading day; skipping manage", today)
+        return 0
+    try:
+        report = reconcile_and_manage(
+            settings, secrets, today=today, dry_run=dry_run, offline=offline
+        )
+        log.info("manage%s: %s", " [dry-run]" if dry_run else "", report.summary())
+    except Exception as exc:  # noqa: BLE001 - surface + non-zero, never raise past the CLI
+        log.error("manage run failed: %s", exc)
+        return 1
+    return 0

@@ -52,6 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Use cached data only; never hit the network.")
     trade_p.add_argument("--config", default=None, metavar="PATH")
 
+    # ---- manage (reconcile fills + exits for open paper trades) ----
+    mng_p = sub.add_parser("manage", help="Reconcile fills + manage exits for open paper trades")
+    mng_p.add_argument("--dry-run", action="store_true",
+                       help="Print intended actions; submit nothing, write nothing.")
+    mng_p.add_argument("--offline", action="store_true",
+                       help="Use cached data only; never hit the network.")
+    mng_p.add_argument("--config", default=None, metavar="PATH")
+
     # Also attach run flags to top-level for backwards compat (no subcommand).
     _add_run_flags(p)
 
@@ -102,6 +110,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "trade":
         from .broker.run import run_trade
         return run_trade(
+            settings=settings, secrets=secrets, dry_run=args.dry_run, offline=args.offline
+        )
+
+    if args.command == "manage":
+        from .broker.run import run_manage
+        return run_manage(
             settings=settings, secrets=secrets, dry_run=args.dry_run, offline=args.offline
         )
 
