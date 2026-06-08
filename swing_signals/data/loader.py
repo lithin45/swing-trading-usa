@@ -15,6 +15,7 @@ import pandas as pd
 
 from ..config_loader import Secrets, Settings
 from ..context import MarketContext, SymbolData
+from .alpaca_provider import AlpacaProvider
 from .cache import OHLCVCache
 from .fred_provider import FredProvider
 from .market import build_market_context
@@ -38,7 +39,16 @@ class DataLoader:
     def _build_price_providers(self) -> list:
         providers: list = []
         for name in self.settings.data.provider_order:
-            if name == "yfinance":
+            if name == "alpaca":
+                ap = AlpacaProvider(
+                    api_key=_reveal(self.secrets.alpaca_api_key),
+                    secret_key=_reveal(self.secrets.alpaca_secret_key),
+                )
+                if ap.available:
+                    providers.append(ap)
+                else:
+                    log.info("alpaca provider disabled (no SWING_ALPACA_API_KEY/SECRET_KEY)")
+            elif name == "yfinance":
                 providers.append(YfinanceProvider())
             elif name == "stooq":
                 sp = StooqProvider(api_key=_reveal(self.secrets.stooq_api_key))
