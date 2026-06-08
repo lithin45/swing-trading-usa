@@ -44,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Use cached data only; never hit the network.")
     tr_p.add_argument("--config", default=None, metavar="PATH")
 
+    # ---- trade (submit paper entries from today's signals) ----
+    trade_p = sub.add_parser("trade", help="Submit Alpaca paper entries for today's signals")
+    trade_p.add_argument("--dry-run", action="store_true",
+                         help="Print intended orders; submit nothing, write nothing.")
+    trade_p.add_argument("--offline", action="store_true",
+                         help="Use cached data only; never hit the network.")
+    trade_p.add_argument("--config", default=None, metavar="PATH")
+
     # Also attach run flags to top-level for backwards compat (no subcommand).
     _add_run_flags(p)
 
@@ -90,6 +98,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "track":
         from .tracking.outcomes import run_tracker
         return run_tracker(settings=settings, secrets=secrets, offline=args.offline)
+
+    if args.command == "trade":
+        from .broker.run import run_trade
+        return run_trade(
+            settings=settings, secrets=secrets, dry_run=args.dry_run, offline=args.offline
+        )
 
     # Default: daily run (``swing-signals`` or ``swing-signals run``).
     dry_run = args.dry_run or settings.alerts.dry_run_default
