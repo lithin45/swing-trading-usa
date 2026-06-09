@@ -107,14 +107,17 @@ def reconcile_and_manage(
 
     with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
         for trade in repo.active_trades(session):
+            bracket = trade.order_class == "bracket"
             try:
                 if trade.status == "pending_entry":
-                    _sync_pending(broker, settings, trade, today, now, report, dry_run)
+                    if bracket:
+                        _sync_pending_bracket(broker, settings, trade, today, now, report, dry_run)
+                    else:
+                        _sync_pending(broker, settings, trade, today, now, report, dry_run)
                 elif trade.status == "open":
-                    _manage_open(
-                        broker, settings, trade, today, now, positions,
-                        loader, report, dry_run, offline,
-                    )
+                    args = (broker, settings, trade, today, now, positions, loader,
+                            report, dry_run, offline)
+                    (_manage_open_bracket if bracket else _manage_open)(*args)
                 elif trade.status == "closing":
                     _sync_closing(broker, trade, today, now, report, dry_run)
             except Exception as exc:  # noqa: BLE001 - one bad symbol must not stop the loop
@@ -259,6 +262,121 @@ def _sync_closing(broker, trade, today, now, report, dry_run) -> None:
             trade.status = "open"
             trade.exit_order_id = None
             trade.updated_at = now
+
+
+# --- bracket handlers (native server-side stop+target OCO) --------------------
+
+def _bracket_leg_ids(order) -> tuple[str | None, str | None]:
+    tp = sl = None
+    for leg in getattr(order, "legs", ()) or ():
+        if leg.stop_price is not None:
+            sl = leg.id
+        elif leg.limit_price is not None:
+            tp = leg.id
+    return tp, sl
+
+
+def _sync_pending_bracket(broker, settings, trade, today, now, report, dry_run) -> None:
+    """GTC bracket entry: fill -> open (capture legs); else age -> market-bracket fallback."""
+    order = broker.get_order_by_id(trade.entry_order_id) if trade.entry_order_id else None
+    bro = settings.broker
+
+    if order is not None and order.is_filled:
+        if not dry_run:
+            trade.status = "open"
+            trade.actual_entry = order.filled_avg_price
+            trade.filled_qty = order.filled_qty or trade.qty
+            trade.entry_fill_date = today
+            if order.filled_avg_price and trade.stop_price is not None:
+                trade.risk_per_share = round(order.filled_avg_price - trade.stop_price, 4)
+            tp_id, sl_id = _bracket_leg_ids(order)
+            trade.take_profit_order_id = tp_id or trade.take_profit_order_id
+            trade.stop_loss_order_id = sl_id or trade.stop_loss_order_id
+            trade.updated_at = now
+        report.filled_entries.append(trade.symbol)
+        return
+
+    # GTC bracket entry doesn't expire; age it by business days since submission.
+    aged = _bars_held(trade.pending_since, today)
+    if order is not None and order.is_open and aged < bro.max_pending_days:
+        return  # still working
+
+    if aged >= bro.max_pending_days:
+        if order is not None and order.is_open:
+            broker.cancel_order(order.id)  # drop the stale GTC bracket
+        if bro.market_fallback and trade.target_price is not None and trade.stop_price is not None:
+            coid = f"swing-{today:%Y%m%d}-{trade.symbol}-mktfallback"
+            if not dry_run:
+                o = broker.submit_bracket_buy(
+                    trade.symbol, qty=trade.qty, limit_price=None,
+                    take_profit=trade.target_price, stop_loss=trade.stop_price,
+                    client_order_id=coid, market=True,
+                )
+                trade.entry_order_id = o.id
+                trade.entry_client_order_id = coid
+                trade.entry_order_type = "market"
+                trade.updated_at = now
+            report.fallback_market.append(trade.symbol)
+        elif not dry_run:
+            trade.status = "canceled"
+            trade.exit_reason = "unfilled"
+            trade.updated_at = now
+            report.canceled.append(trade.symbol)
+
+
+def _manage_open_bracket(
+    broker, settings, trade, today, now, positions, loader, report, dry_run, offline
+) -> None:
+    """Open bracketed position: trail the stop leg; time-stop manually; reconcile OCO fills."""
+    pos = positions.get(trade.symbol)
+    if pos is None:  # a child leg (stop or target) filled — reconcile P&L
+        _reconcile_bracket_exit(broker, trade, today, now, report, dry_run)
+        return
+
+    df = _recent_ohlcv(loader, trade.symbol, trade.entry_fill_date, today, offline)
+    bro = settings.broker
+
+    # 1) ratchet the chandelier and trail the server-side stop leg up to it
+    eff = trade.effective_stop if trade.effective_stop is not None else trade.stop_price
+    chand = _chandelier(df, settings.risk.chandelier_lookback, settings.risk.chandelier_multiple)
+    if chand is not None and (eff is None or chand > eff):
+        eff = chand
+        if not dry_run:
+            trade.effective_stop = eff
+            trade.chandelier_stop = chand
+            if trade.stop_loss_order_id:
+                broker.replace_stop(trade.stop_loss_order_id, stop_price=eff)  # non-fatal
+
+    # 2) time-stop (brackets don't expire): cancel the OCO legs, then market-sell
+    if _bars_held(trade.entry_fill_date, today) >= bro.max_hold_bars:
+        if not dry_run:
+            for oid in (trade.take_profit_order_id, trade.stop_loss_order_id):
+                if oid:
+                    broker.cancel_order(oid)
+            coid = f"swing-{today:%Y%m%d}-{trade.symbol}-exit"
+            o = broker.submit_sell(
+                trade.symbol, qty=pos.qty, order_type="market", client_order_id=coid
+            )
+            trade.exit_order_id = o.id
+            trade.exit_reason = "time_exit"
+            trade.status = "closing"
+            trade.updated_at = now
+        report.exits_submitted.append((trade.symbol, "time_exit"))
+
+
+def _reconcile_bracket_exit(broker, trade, today, now, report, dry_run) -> None:
+    """Position gone: find which OCO leg filled (stop vs target) and finalize realized P&L."""
+    fill_price = None
+    reason = "external"
+    sl = broker.get_order_by_id(trade.stop_loss_order_id) if trade.stop_loss_order_id else None
+    tp = broker.get_order_by_id(trade.take_profit_order_id) if trade.take_profit_order_id else None
+    if sl is not None and sl.is_filled:
+        fill_price, reason = sl.filled_avg_price, "stopped"
+    elif tp is not None and tp.is_filled:
+        fill_price, reason = tp.filled_avg_price, "target_hit"
+    if not dry_run:
+        _finalize_closed(trade, fill_price, today, reason, now)
+    report.closed.append(trade.symbol)
 
 
 # --- helpers ------------------------------------------------------------------

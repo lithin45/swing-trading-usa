@@ -136,6 +136,45 @@ class AlpacaBroker:
             client_order_id=client_order_id,
         ))
 
+    def submit_bracket_buy(
+        self, symbol: str, *, qty: float, limit_price: float | None, take_profit: float,
+        stop_loss: float, client_order_id: str, market: bool = False,
+    ) -> BrokerOrder:
+        """Whole-share entry with server-side take-profit + stop-loss (OCO bracket, GTC)."""
+        self._require_enabled()
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            LimitOrderRequest,
+            MarketOrderRequest,
+            StopLossRequest,
+            TakeProfitRequest,
+        )
+
+        common = dict(
+            symbol=symbol, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.BRACKET, client_order_id=client_order_id,
+            take_profit=TakeProfitRequest(limit_price=round(float(take_profit), 2)),
+            stop_loss=StopLossRequest(stop_price=round(float(stop_loss), 2)),
+        )
+        if market or limit_price is None:
+            return self._submit(MarketOrderRequest(**common))
+        return self._submit(LimitOrderRequest(limit_price=round(float(limit_price), 2), **common))
+
+    def replace_stop(self, order_id: str, *, stop_price: float) -> BrokerOrder | None:
+        """Trail a bracket's stop-loss leg to a new (higher) stop. None on failure (non-fatal)."""
+        self._require_enabled()
+        from alpaca.common.exceptions import APIError
+        from alpaca.trading.requests import ReplaceOrderRequest
+
+        try:
+            order = self._trading().replace_order_by_id(
+                order_id, order_data=ReplaceOrderRequest(stop_price=round(float(stop_price), 2))
+            )
+            return self._map_order(order)
+        except APIError as exc:
+            log.info("replace_stop %s no-op: %s", order_id, exc)
+            return None
+
     def submit_sell(
         self, symbol: str, *, qty: float, order_type: str = "market",
         limit_price: float | None = None, stop_price: float | None = None,
@@ -209,8 +248,11 @@ class AlpacaBroker:
             current_price=_f(p.current_price) or 0.0,
         )
 
-    @staticmethod
-    def _map_order(o) -> BrokerOrder:
+    @classmethod
+    def _map_order(cls, o, *, with_legs: bool = True) -> BrokerOrder:
+        legs: tuple = ()
+        if with_legs and getattr(o, "legs", None):
+            legs = tuple(cls._map_order(leg, with_legs=False) for leg in o.legs)
         return BrokerOrder(
             id=str(o.id),
             client_order_id=o.client_order_id or "",
@@ -226,4 +268,5 @@ class AlpacaBroker:
             filled_avg_price=_f(o.filled_avg_price),
             submitted_at=o.submitted_at,
             filled_at=o.filled_at,
+            legs=legs,
         )

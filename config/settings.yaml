@@ -6,10 +6,11 @@
 # =====================================================================
 
 account:
-  equity: 500.0            # current account equity in USD; update as it scales
+  equity: 200000.0         # account equity in USD (Alpaca paper default ~$200k); broker can
+                           # also size off LIVE equity — see broker.size_from_live_equity
   risk_pct: 0.01           # per-trade risk, fraction of equity (1% default)
   risk_pct_ceiling: 0.02   # hard ceiling — sizing may never exceed this
-  fractional_shares: true  # required at ~$500 for percentage sizing to work
+  fractional_shares: true  # engine sizes fractionally; whole-share brackets floor at submit
   broker_min_order_usd: 1.0
 
 watchlist:
@@ -101,15 +102,17 @@ broker:
   enabled: false
   provider: alpaca
   paper: true                      # paper trading only — never a live brokerage account
+  entry_class: auto                # auto = native bracket when whole-share, else simple+self-managed
+  size_from_live_equity: true      # size off the broker's LIVE equity (tracks the real paper account)
   entry_order_type: limit          # limit at the top of the pullback zone
   entry_price_ref: zone_high       # entry_zone_high (the pullback ceiling)
-  tif: day                         # fractional requires DAY time-in-force
+  tif: day                         # fractional simple orders require DAY (brackets use GTC)
   max_pending_days: 3              # cancel / market-fallback after N sessions unfilled
   market_fallback: true            # market order if the limit never fills
-  entry_reprice_each_day: true     # re-place the DAY limit each session until filled/aged
-  place_protective_stops: true     # standalone STOP-DAY each session (intraday safety net)
+  entry_reprice_each_day: true     # re-place the DAY limit each session until filled/aged (simple)
+  place_protective_stops: true     # standalone STOP-DAY (simple/fractional intraday safety net)
   max_hold_bars: 20                # time-stop (trading days), aligned with backtest
-  whole_share_only: false          # honor account.fractional_shares
+  whole_share_only: false          # honor account.fractional_shares (simple path)
   min_order_usd: 1.0               # Alpaca fractional minimum
 
 # Stage 5 backtest parameters (file 11).
@@ -122,4 +125,4 @@ backtest:
   cost_bps: 10.0
   max_hold_bars: 20
   warmup_bars: 210
-  equity_start: 500.0
+  equity_start: 200000.0

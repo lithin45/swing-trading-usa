@@ -99,11 +99,14 @@ signal-only tool above. Turn it on by adding keys and flipping `broker.enabled: 
 `config/settings.yaml`.
 
 **What it adds**
-- **Automated Alpaca paper trading.** After signals are generated, `trade` submits a DAY limit at
-  the top of each pullback zone; `manage` reconciles fills, trails the chandelier stop, exits on
-  stop/target/time-stop, and falls back to a market order if a limit ages out. At ~$500 positions
-  are fractional (Alpaca forbids brackets there), so exits are self-managed with a standalone
-  STOP-DAY order as the intraday safety net. Idempotent: it can never double-open a day's signal.
+- **Automated Alpaca paper trading.** After signals are generated, `trade` sizes each position off
+  your **live paper equity** (Alpaca paper starts ~$200k) and submits the entry; `manage` reconciles
+  fills, trails the chandelier stop, applies the time-stop, and falls back to a market order if an
+  entry ages out. **Whole-share positions use a native Alpaca bracket** (server-side stop + target,
+  OCO — enforced in real time, not dependent on the cron); the trailing stop is pushed up by
+  *replacing* the bracket's stop leg. If equity is small enough that a position is fractional,
+  Alpaca forbids brackets, so it falls back to a self-managed exit with a standalone STOP-DAY order.
+  Idempotent: it can never double-open a day's signal.
 - **Claude news factor + daily brief.** The `news_sentiment` (f02) factor scores headlines
   (Finnhub / Alpha Vantage / SEC 8-Ks) at the entity level with Claude; a plain-English daily
   brief is written for the dashboard. Both DB-memoized — an idempotent re-run never re-bills.
@@ -119,7 +122,9 @@ signal-only tool above. Turn it on by adding keys and flipping `broker.enabled: 
    ```bash
    pip install -e ".[data,db,broker,ai,postgres]"
    ```
-3. In `config/settings.yaml` set `broker.enabled: true` (keep `paper: true`).
+3. In `config/settings.yaml` set `broker.enabled: true` (keep `paper: true`). Sizing auto-tracks
+   your live paper equity (`broker.size_from_live_equity`), so you don't need to hand-tune
+   `account.equity`; brackets are used automatically for whole-share positions (`entry_class: auto`).
 4. Dry-run first, then go live on paper:
    ```bash
    swing-signals && swing-signals trade --dry-run     # preview intended orders

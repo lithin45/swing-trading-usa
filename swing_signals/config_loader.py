@@ -163,6 +163,10 @@ class BrokerCfg(StrictModel):
     enabled: bool = False
     provider: Literal["alpaca"] = "alpaca"
     paper: bool = True  # paper trading only — the bot never touches a live brokerage account
+    # auto = native bracket (server-side stop+target OCO) when the position is whole-share,
+    # else a simple limit + self-managed exits (the only option for fractional positions).
+    entry_class: Literal["auto", "bracket", "simple"] = "auto"
+    size_from_live_equity: bool = True  # size off the broker's live equity, not just config
     entry_order_type: Literal["limit", "market"] = "limit"
     entry_price_ref: Literal["zone_high", "zone_low", "reference"] = "zone_high"
     tif: Literal["day"] = "day"  # fractional orders require DAY time-in-force

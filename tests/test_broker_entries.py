@@ -88,6 +88,10 @@ def _settings(tmp_path, **broker_overrides):
     s = load_settings()
     s.run.db_url = f"sqlite:///{tmp_path}/trade.db"
     s.broker.enabled = True
+    # These tests exercise the simple (fractional) path sized off the engine's number;
+    # the bracket + live-equity path has its own test file.
+    s.broker.entry_class = "simple"
+    s.broker.size_from_live_equity = False
     for k, v in broker_overrides.items():
         setattr(s.broker, k, v)
     return s

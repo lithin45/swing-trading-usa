@@ -66,6 +66,7 @@ class BrokerOrder:
     filled_avg_price: float | None
     submitted_at: datetime | None = None
     filled_at: datetime | None = None
+    legs: tuple = ()  # bracket child orders (take-profit + stop-loss), once activated
 
     @property
     def is_filled(self) -> bool:
@@ -98,6 +99,11 @@ class BrokerClient(Protocol):
     def submit_market_buy(
         self, symbol: str, *, qty: float, client_order_id: str
     ) -> BrokerOrder: ...
+    def submit_bracket_buy(
+        self, symbol: str, *, qty: float, limit_price: float | None, take_profit: float,
+        stop_loss: float, client_order_id: str, market: bool = False,
+    ) -> BrokerOrder: ...
+    def replace_stop(self, order_id: str, *, stop_price: float) -> BrokerOrder | None: ...
     def submit_sell(
         self, symbol: str, *, qty: float, order_type: str = "market",
         limit_price: float | None = None, stop_price: float | None = None,

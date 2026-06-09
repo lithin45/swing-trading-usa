@@ -122,6 +122,7 @@ class Trade(Base):
     symbol: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(default="pending_entry")
     # pending_entry | open | closing | closed | canceled
+    order_class: Mapped[str] = mapped_column(String(12), default="simple")  # bracket | simple
 
     # --- entry ---
     entry_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
@@ -140,6 +141,10 @@ class Trade(Base):
     effective_stop: Mapped[float | None] = mapped_column(default=None)  # max(stop, chandelier)
     risk_per_share: Mapped[float | None] = mapped_column(default=None)  # actual_entry - stop = 1R
     suggested_risk_pct: Mapped[float | None] = mapped_column(default=None)  # live portfolio heat
+
+    # --- bracket child legs (native OCO; server-side stop+target) ---
+    take_profit_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    stop_loss_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
 
     # --- exit ---
     exit_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
