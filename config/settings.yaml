@@ -6,8 +6,8 @@
 # =====================================================================
 
 account:
-  equity: 200000.0         # account equity in USD (Alpaca paper default ~$200k); broker can
-                           # also size off LIVE equity — see broker.size_from_live_equity
+  equity: 100000.0         # matches the live Alpaca paper account; the broker also sizes off
+                           # LIVE equity at order time — see broker.size_from_live_equity
   risk_pct: 0.01           # per-trade risk, fraction of equity (1% default)
   risk_pct_ceiling: 0.02   # hard ceiling — sizing may never exceed this
   fractional_shares: true  # engine sizes fractionally; whole-share brackets floor at submit
