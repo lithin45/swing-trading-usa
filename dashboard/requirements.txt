@@ -1,0 +1,13 @@
+# Streamlit Community Cloud installs these (it does not read pyproject extras).
+# swing_signals itself is imported from the repo via a sys.path shim in _data.py,
+# so only its third-party dependencies need listing here.
+streamlit>=1.36
+plotly>=5.22
+pandas>=2.2
+numpy>=1.26
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+alpaca-py>=0.20
+pydantic>=2.6
+pydantic-settings>=2.2
+pyyaml>=6.0
