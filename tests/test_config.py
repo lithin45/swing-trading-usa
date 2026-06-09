@@ -85,12 +85,12 @@ def test_tier_order_validation():
 
 # --- broker config (Stage 8) ---------------------------------------------------
 
-def test_broker_config_loads_disabled_by_default():
+def test_broker_config_loads_paper_only():
     s = load_settings()
     assert s.broker is not None
-    assert s.broker.enabled is False  # signal-only until explicitly enabled
-    assert s.broker.paper is True
+    assert s.broker.paper is True  # never a live brokerage account
     assert s.broker.entry_price_ref == "zone_high"
+    assert s.broker.entry_class == "auto"
 
 
 def test_broker_section_optional():

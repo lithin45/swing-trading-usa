@@ -57,8 +57,8 @@ risk:
   chandelier_lookback: 22           # trailing-stop lookback (~1 month)
   chandelier_multiple: 3.0
   rr_target: 2.0                    # reward:risk target (2R)
-  max_positions: 4                  # 2-4 concurrent at ~$500
-  portfolio_heat_cap: 0.06          # total open risk ceiling (6% conservative)
+  max_positions: 8                  # concurrent positions (raised for the ~$100k paper account)
+  portfolio_heat_cap: 0.10          # total open risk ceiling (10%)
   sector_heat_cap: 0.30             # max share of heat in one sector
   max_per_sector: 2
   daily_loss_halt: 0.03             # halt new entries at -3% day
@@ -99,7 +99,7 @@ run:
 # signal-only until you add Alpaca keys and flip `enabled: true`. At ~$500 equity positions are
 # fractional, so exits are managed by the `manage` job (Alpaca forbids brackets on fractional).
 broker:
-  enabled: false
+  enabled: true
   provider: alpaca
   paper: true                      # paper trading only — never a live brokerage account
   entry_class: auto                # auto = native bracket when whole-share, else simple+self-managed
