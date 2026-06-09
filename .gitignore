@@ -4,6 +4,9 @@
 !.env.example
 *.key
 secrets/
+# Streamlit secrets (the .example template is committed; the real file is not).
+.streamlit/secrets.toml
+dashboard/.streamlit/secrets.toml
 
 # --- Data cache, databases, generated output ---
 .cache/

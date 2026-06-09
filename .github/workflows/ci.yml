@@ -29,13 +29,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install (with data + dev extras)
+      - name: Install (with data + dev + stage-8 extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,data,db]"
+          pip install -e ".[dev,data,db,broker,ai,postgres,dashboard]"
 
       - name: Ruff (lint)
-        run: ruff check swing_signals tests
+        run: ruff check swing_signals tests dashboard
 
       - name: Mypy (type-check)
         run: mypy swing_signals

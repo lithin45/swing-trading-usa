@@ -1,0 +1,36 @@
+name: Intraday manage
+
+# Tighter intra-session pass so stops/targets/time-stops are checked through the day,
+# not just after close. Requires DATABASE_URL (Neon) so it sees the open positions the
+# daily run opened — without it each ephemeral runner starts from an empty DB and no-ops.
+#
+# GitHub Actions cron is best-effort (can be delayed many minutes); the standalone
+# server-side STOP-DAY protective orders (broker.place_protective_stops) are the real
+# intraday safety net between runs. For true real-time management, run `swing-signals
+# manage` in a loop on an always-on host — the code is host-agnostic.
+on:
+  schedule:
+    # Every 30 min, 13:00-21:00 UTC, Mon-Fri — spans US market hours across DST.
+    - cron: "0,30 13-21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  manage:
+    runs-on: ubuntu-latest
+    env:
+      SWING_ALPACA_API_KEY: ${{ secrets.SWING_ALPACA_API_KEY }}
+      SWING_ALPACA_SECRET_KEY: ${{ secrets.SWING_ALPACA_SECRET_KEY }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_INTRADAY_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[data,db,broker,postgres]"
+      - name: Manage open positions
+        run: swing-signals manage
