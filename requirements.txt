@@ -1,0 +1,14 @@
+# Root requirements for Streamlit Community Cloud (entrypoint: dashboard/app.py).
+# swing_signals is imported from the repo via a sys.path shim in dashboard/_data.py,
+# so only its third-party dependencies are listed here. Local dev + CI use pyproject
+# extras instead and ignore this file.
+streamlit>=1.36
+plotly>=5.22
+pandas>=2.2
+numpy>=1.26
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+alpaca-py>=0.20
+pydantic>=2.6
+pydantic-settings>=2.2
+pyyaml>=6.0
