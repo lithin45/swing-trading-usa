@@ -143,3 +143,14 @@ def test_resolve_db_url_secrets_only_when_passed(monkeypatch):
 
 def test_normalize_leaves_sqlite_untouched():
     assert _normalize_db_url("sqlite:///signals.db") == "sqlite:///signals.db"
+
+
+def test_empty_env_secrets_treated_as_unset(monkeypatch):
+    # GitHub Actions sets undefined secrets to "" — must not abort the run.
+    monkeypatch.setenv("SWING_SMTP_PORT", "")
+    monkeypatch.setenv("SWING_TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setenv("SWING_ALPACA_API_KEY", "")
+    sec = Secrets(_env_file=None)
+    assert sec.smtp_port == 587            # empty int env -> default, not a crash
+    assert sec.telegram_bot_token is None  # empty secret -> unset, not SecretStr("")
+    assert sec.alpaca_api_key is None

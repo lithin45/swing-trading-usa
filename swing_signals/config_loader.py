@@ -264,6 +264,18 @@ class Secrets(BaseSettings):
     database_url: str | None = None
     dashboard_password: SecretStr | None = None
 
+    @field_validator("*", mode="before")
+    @classmethod
+    def _empty_str_is_unset(cls, v, info):
+        """Treat an empty env var (GitHub sets undefined secrets to "") as unset.
+
+        Without this, ``SWING_SMTP_PORT=""`` from a workflow fails int validation and aborts the
+        whole run; other empty secrets would become ``SecretStr("")`` (truthy) and look 'present'.
+        """
+        if isinstance(v, str) and v == "":
+            return 587 if info.field_name == "smtp_port" else None
+        return v
+
 
 def load_settings(path: str | Path | None = None) -> Settings:
     """Load and validate ``settings.yaml``. Raises on missing file or invalid config."""
