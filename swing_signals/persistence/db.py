@@ -29,11 +29,14 @@ def _ensure_columns(engine: Engine) -> None:
         return  # create_all already made it fresh with every column
     existing = {c["name"] for c in insp.get_columns("trades")}
     missing = {c: t for c, t in _TRADE_ADDED_COLUMNS.items() if c not in existing}
-    if not missing:
-        return
-    with engine.begin() as conn:
-        for col, sql_type in missing.items():
-            conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} {sql_type}"))
+    # Each ADD in its own transaction + swallow errors, so a concurrent add (the bot
+    # and the dashboard can both run this against the same DB) can't fail the caller.
+    for col, sql_type in missing.items():
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} {sql_type}"))
+        except Exception:  # noqa: BLE001 - already added concurrently / by the other process
+            pass
 
 
 def make_engine(url: str = "sqlite:///signals.db", *, echo: bool = False) -> Engine:
