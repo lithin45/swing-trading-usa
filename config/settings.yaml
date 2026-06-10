@@ -35,6 +35,8 @@ factors:
 
 scoring:
   composite_min: 70.0      # minimum conviction (0-100) to emit a signal (raised for selectivity)
+  max_extension_atr: 3.0   # don't-chase gate: veto entries >3 ATR above the 20-EMA
+                           # (2026-06 experiments: chasing extension bled expectancy)
   agreement_min: 0.70      # confluence: fraction of weighted factors agreeing (raised)
   tier_high: 80.0          # conviction tiers → position-size multiplier
   tier_medium: 70.0
@@ -58,7 +60,10 @@ regime:
 # File 08 — hard risk & sizing constraints (all percentages of current equity).
 risk:
   atr_period: 14
-  atr_stop_multiple: 2.0            # initial stop = entry - 2*ATR (swing default)
+  atr_stop_multiple: 3.0            # initial stop = entry - 3*ATR. Widened from 2.0
+                                    # (2026-06 experiments: 2-ATR stops sat inside the daily
+                                    # noise of fresh momentum entries — 48% of trades died
+                                    # <10 bars at ~-0.9R; same $ risk, fewer noise deaths)
   chandelier_lookback: 22           # trailing-stop lookback (~1 month)
   chandelier_multiple: 3.0
   rr_target: 2.0                    # reward:risk target (2R)
@@ -71,14 +76,24 @@ risk:
   monthly_loss_halt: 0.10
   drawdown_derisk: 0.10             # cut risk 50% when -10% from peak
   drawdown_hard_halt: 0.15          # full halt + review at -15%
+  # Concentration caps: risk-at-stop sizing gives the LARGEST dollar position to the
+  # LOWEST-vol names (1% risk / 2% stop = 50% of equity!) — bound the gap risk a stop
+  # can't contain. Gross cap 1.0 = entries never lever the account (Alpaca grants 2x).
+  max_position_notional_pct: 0.20   # one position <= 20% of equity
+  max_gross_exposure: 1.0           # sum of open notionals <= 100% of equity
 
 # Exit state machine (swing_signals/exits.py). mode=legacy reproduces the original
 # full-exit-at-target + hard 20-bar time-stop. mode=staged is the researched upgrade:
 # scale a partial out at the first target, ratchet to breakeven, ride a chandelier
-# trail with NO hard time cap, and time-cut only stagnant trades. Keep `legacy` until
-# the staged live-order plumbing is validated on paper, then flip to `staged`.
+# trail with NO hard time cap, and time-cut only stagnant trades.
+# STATUS: staged ran live 2026-06-09 → 2026-06-10, then the broad-universe
+# experiments reverted the default to legacy (see exits.mode note below).
 exits:
-  mode: staged                      # legacy | staged  (staged = partial profit + let winners run)
+  mode: legacy                      # legacy | staged. Flipped back to legacy 2026-06-10: in the
+                                    # broad-universe experiments the staged trail gave back more
+                                    # than it earned (PF 0.77 vs 0.89 legacy, 2022-24); the full
+                                    # combo (legacy + no-chase + 3-ATR stop) validated on the
+                                    # untouched 2025→2026-06 holdout (+0.118R, PF 1.27).
   partial_take_frac: 0.5            # fraction sold at the first (2R) target in staged mode
   move_stop_to: breakeven           # breakeven | none — where the stop goes after the partial
   stagnation_bars: 15               # cut a not-yet-working trade after this many bars
@@ -155,4 +170,4 @@ backtest:
   cost_bps: 10.0
   max_hold_bars: 20
   warmup_bars: 210
-  equity_start: 200000.0
+  equity_start: 100000.0   # = account.equity, so $ figures are comparable to the live account

@@ -71,11 +71,22 @@ swing-signals --dry-run     # full pipeline; prints the ranked report, sends/per
 swing-signals               # live run: pull EOD data, score, persist to SQLite, alert
 swing-signals --offline     # cached data only (no network)
 swing-signals track         # resolve open signals' outcomes (realized R, MAE/MFE) vs fresh prices
-swing-signals backtest --from 2022-01-01 --to 2024-12-31   # backtest harness
+swing-signals backtest --from 2022-01-01 --to 2024-12-31   # backtest harness (static watchlist)
+swing-signals backtest --universe sp500                    # point-in-time S&P 500 membership —
+                                #   the broad universe live trades, with index changes replayed
+                                #   historically (needs config/sp500_changes.csv; see below)
+swing-signals refresh-sp500     # rewrite config/sp500.csv + sp500_changes.csv from Wikipedia
 swing-signals trade --dry-run   # Stage 8: preview today's paper entries (submits nothing)
 swing-signals trade             # submit Alpaca paper entries (needs broker.enabled + keys)
 swing-signals manage            # reconcile fills, trail stops, exit, snapshot the account
 ```
+
+The broad backtest (`--universe sp500`) reconstructs index membership per bar from the committed
+change log, so it never hands the engine a name the live screen could not have seen that day; it
+also feeds the regime gate **real historical VIX/VIX3M from FRED** (with the SPY-ATR% proxy as the
+no-key fallback) and reports how many membership names had no fetchable price history (the honest
+residual survivorship gap — fully delisted names usually lack free data). `--include-themes` adds
+today's curated theme list for live-parity exploration (explicitly biased — not for validation).
 
 `--dry-run` runs the real pipeline (data → factors → regime/macro gates → scoring → ATR levels
 + equity sizing) and prints a ranked report, but never writes the DB or sends alerts. A live run
@@ -100,13 +111,14 @@ signal-only tool above. Turn it on by adding keys and flipping `broker.enabled: 
 
 **What it adds**
 - **Automated Alpaca paper trading.** After signals are generated, `trade` sizes each position off
-  your **live paper equity** (Alpaca paper starts ~$200k) and submits the entry; `manage` reconciles
-  fills, trails the chandelier stop, applies the time-stop, and falls back to a market order if an
-  entry ages out. **Whole-share positions use a native Alpaca bracket** (server-side stop + target,
-  OCO — enforced in real time, not dependent on the cron); the trailing stop is pushed up by
-  *replacing* the bracket's stop leg. If equity is small enough that a position is fractional,
-  Alpaca forbids brackets, so it falls back to a self-managed exit with a standalone STOP-DAY order.
-  Idempotent: it can never double-open a day's signal.
+  your **live paper equity** (this account: ~$100k), capped by a per-position notional limit and a
+  gross-exposure ceiling, and submits the entry; `manage` reconciles fills (including partials),
+  trails the chandelier stop, applies the staged/time exits, adopts any orphaned positions under a
+  synthesized stop, and falls back to a market order (re-anchoring stop/target off the actual fill)
+  if an entry ages out. In `exits.mode: staged` (live) entries are simple orders with self-managed
+  exits + a standalone STOP-DAY protective order; in legacy mode, whole-share positions use a native
+  Alpaca bracket (server-side stop + target, OCO). Idempotent: it can never double-open a day's
+  signal.
 - **Claude news factor + daily brief.** The `news_sentiment` (f02) factor scores headlines
   (Finnhub / Alpha Vantage / SEC 8-Ks) at the entity level with Claude; a plain-English daily
   brief is written for the dashboard. Both DB-memoized — an idempotent re-run never re-bills.

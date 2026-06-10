@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -9,6 +10,8 @@ from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session
 
 from .models import Base
+
+log = logging.getLogger("swing_signals.persistence")
 
 # Columns added to `trades` after the table first shipped. create_all() makes a fresh
 # table with every column but does NOT alter an existing one, so for a DB created before
@@ -19,6 +22,7 @@ _TRADE_ADDED_COLUMNS = {
     "partial_qty": "FLOAT",
     "partial_fill_price": "FLOAT",
     "partial_fill_date": "DATE",
+    "partial_order_id": "VARCHAR(64)",
 }
 
 
@@ -37,6 +41,15 @@ def _ensure_columns(engine: Engine) -> None:
                 conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} {sql_type}"))
         except Exception:  # noqa: BLE001 - already added concurrently / by the other process
             pass
+    if missing:
+        # The swallow above is for the benign concurrent-add race; verify nothing REAL
+        # (permissions, dropped connection) was silenced, else queries fail far from here.
+        still_missing = missing.keys() - {c["name"] for c in inspect(engine).get_columns("trades")}
+        if still_missing:
+            log.error(
+                "trades migration could not add columns %s — staged-exit queries will fail; "
+                "check DB permissions/connectivity", sorted(still_missing),
+            )
 
 
 def make_engine(url: str = "sqlite:///signals.db", *, echo: bool = False) -> Engine:

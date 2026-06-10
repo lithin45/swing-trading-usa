@@ -83,3 +83,28 @@ def test_retry_does_not_retry_permanent():
     with pytest.raises(PermanentDataError):
         broken()
     assert calls["n"] == 1  # failed fast, no retries
+
+
+def test_cache_put_union_merges_disjoint_ranges(tmp_path):
+    """A deep-past fetch must not truncate newer cached bars (and vice versa)."""
+    cache = OHLCVCache(tmp_path)
+    recent = _df(n=10, end="2024-01-05")
+    cache.put("AAPL", recent)
+    older = _df(n=10, end="2018-06-29")
+    cache.put("AAPL", older)
+    got = cache.get("AAPL")
+    assert len(got) == 20
+    assert got.index.min() == older.index.min()
+    assert got.index.max() == recent.index.max()
+
+
+def test_cache_put_degenerate_frame_never_truncates(tmp_path):
+    """A throttled provider's 1-bar response must not gut a multi-year cache."""
+    cache = OHLCVCache(tmp_path)
+    full = _df(n=500, end="2024-01-05")
+    cache.put("SPY", full)
+    one_bar = _df(n=1, end="2021-06-15")
+    cache.put("SPY", one_bar)
+    got = cache.get("SPY")
+    assert len(got) == 501  # union: nothing lost, the lone bar added
+    assert got.index.max() == full.index.max()

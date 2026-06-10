@@ -58,8 +58,12 @@ def format_backtest_report(
         f"Equity:      ${m['equity_start']:,.2f} → ${m['equity_end']:,.2f}"
     )
     lines.append(
-        f"Signals gen: {result.n_signals_generated} entries opened, "
+        f"Signals gen: {result.n_signals_generated} actionable, "
         f"{result.n_no_trades} no-trades"
+    )
+    lines.append(
+        f"Entry model: {result.n_unfilled} limits never filled, "
+        f"{result.n_capped} skipped by position/heat caps"
     )
     lines.append("")
 

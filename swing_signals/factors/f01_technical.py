@@ -164,8 +164,11 @@ class TechnicalFactor(Factor):
             s, r = 20.0, "price below EMA50"
         comps.append(_Component("stacked_ema", s, T1, r))
 
-        # 3. Time-series momentum, 6-month (T1)
-        s = _clip(50.0 + 1000.0 * mom6)
+        # 3. Time-series momentum, 6-month (T1). Same slope as f08's ROC component
+        # (saturates at ±25%): the old 1000x slope pegged every screened candidate
+        # at 100 in a normal bull tape, erasing cross-sectional discrimination on a
+        # triple-weighted component.
+        s = _clip(50.0 + 200.0 * mom6)
         comps.append(_Component("momentum6m", s, T1, f"6-month momentum {mom6:+.1%}"))
 
         # 5. Pullback-to-EMA20 quality (T2) — bullish dip recaptured

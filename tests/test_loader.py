@@ -117,3 +117,20 @@ def test_load_watchlist_parallel_isolates_one_bad_symbol(loader):
     res = loader.load_watchlist(["AAA", "BAD", "BBB"], ASOF)
     assert res["AAA"].ok and res["BBB"].ok
     assert not res["BAD"].ok
+
+
+def test_degenerate_provider_frame_falls_through(loader):
+    """A near-empty frame for a long request is a failure, not an answer."""
+    tiny = _clean_df(n=3)
+    full = _clean_df(n=300)
+    loader.providers = [_Fake("throttled", tiny), _Fake("backup", full)]
+    df = loader.get_ohlcv("AAPL", "2018-01-01", "2019-12-31")
+    assert len(df) == 300  # the backup's full frame won
+
+
+def test_degenerate_guard_skips_short_requests(loader):
+    """A short request may legitimately return few bars — no false rejection."""
+    tiny = _clean_df(n=3)
+    loader.providers = [_Fake("p", tiny)]
+    df = loader.get_ohlcv("AAPL", "2024-01-01", "2024-01-10")
+    assert len(df) == 3

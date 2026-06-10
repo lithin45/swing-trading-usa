@@ -25,4 +25,6 @@ def ping(url: str | None, *, fail: bool = False, timeout: float = 10.0) -> None:
 
         requests.get(target, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - monitoring must never break the run
-        log.warning("healthcheck ping failed (%s): %s", target, exc)
+        # Never log the URL: the check UUID in it is the only credential needed to
+        # send fake "all good" pings, and these logs are public in CI.
+        log.warning("healthcheck ping failed: %s", type(exc).__name__)

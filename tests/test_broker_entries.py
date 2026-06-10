@@ -204,3 +204,43 @@ def test_size_skip_when_below_min(tmp_path, monkeypatch):
     )
     assert report.submitted == []
     assert [sym for sym, _ in report.skipped_size] == ["AAPL"]
+
+
+# --- batch capital tracking: gross-exposure cap + buying-power decrement --------
+
+def test_gross_exposure_cap_blocks_excess(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    s.risk.max_gross_exposure = 1.0
+    # equity 500 -> gross cap $500; two ~$300 orders: the second must be skipped.
+    _seed(s.run.db_url, [_sig("AAPL", shares=3.0, rank=1), _sig("MSFT", shares=3.0, rank=2)])
+    broker = FakeBroker(equity=500.0, buying_power=1000.0)
+    rep = submit_entries(s, _secrets(monkeypatch), today=DAY, broker=broker)
+    assert rep.submitted == ["AAPL"]
+    assert any("gross exposure" in why for _, why in rep.skipped_gated)
+
+
+def test_buying_power_decrements_across_batch(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    s.risk.max_gross_exposure = 2.0  # out of the way; this test isolates buying power
+    _seed(s.run.db_url, [_sig("AAPL", shares=3.0, rank=1), _sig("MSFT", shares=3.0, rank=2)])
+    broker = FakeBroker(equity=500.0, buying_power=400.0)
+    rep = submit_entries(s, _secrets(monkeypatch), today=DAY, broker=broker)
+    assert rep.submitted == ["AAPL", "MSFT"]
+    # AAPL consumed $300 of the $400: MSFT must size into the ~$98 remainder, not $392.
+    msft = next(o for o in broker.submitted if o.symbol == "MSFT")
+    assert msft.qty is not None and msft.qty < 1.0
+
+
+def test_live_equity_sizing_respects_notional_cap(tmp_path, monkeypatch):
+    s = _settings(tmp_path, size_from_live_equity=True)
+    s.risk.max_position_notional_pct = 0.20
+    s.risk.max_gross_exposure = 2.0
+    # tight 1.0 stop distance: uncapped 1% risk = $100k notional on a $100k account.
+    sig = _sig("AAPL", shares=1000.0, risk=0.01)
+    sig.stop_price = 99.0
+    _seed(s.run.db_url, [sig])
+    broker = FakeBroker(equity=100_000.0, buying_power=200_000.0)
+    rep = submit_entries(s, _secrets(monkeypatch), today=DAY, broker=broker)
+    assert rep.submitted == ["AAPL"]
+    aapl = next(o for o in broker.submitted if o.symbol == "AAPL")
+    assert aapl.qty is not None and abs(aapl.qty - 200.0) < 1e-6  # $20k cap / $100 entry

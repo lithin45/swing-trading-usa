@@ -84,3 +84,13 @@ def test_no_snapshots_no_halt():
     s = load_settings()
     g = evaluate_gates(s, account=_acct(400.0), open_trades=[], snapshots=[], today=TODAY)
     assert not g.halted  # no history -> period baselines skipped, peak == current
+
+
+def test_broker_blocked_account_halts():
+    s = load_settings()
+    acct = BrokerAccount(equity=1000.0, cash=1000.0, buying_power=1000.0,
+                         trading_blocked=True)
+    state = evaluate_gates(s, account=acct, open_trades=[], snapshots=[],
+                           today=date(2024, 1, 8))
+    assert state.halted
+    assert "blocked" in (state.halt_reason or "")

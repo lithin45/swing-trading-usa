@@ -39,7 +39,8 @@ class RegimeModule(MarketModule):
         cfg = ctx.settings.regime
 
         # Fail-safe: can't assess the regime -> no new longs.
-        if market is None or market.spy is None or len(market.spy) < _MIN_BARS:
+        min_bars = max(_MIN_BARS, cfg.spy_ma_days + 10)
+        if market is None or market.spy is None or len(market.spy) < min_bars:
             return MarketState(
                 name=self.name, score=0.0, state="RED", multiplier=0.0, veto=True,
                 reasons=["regime data unavailable (SPY missing/short) — fail-safe veto"],
@@ -49,6 +50,8 @@ class RegimeModule(MarketModule):
 
         close = spy["close"]
         c = float(close.iloc[-1])
+        ma_gate_s = ind.sma(close, cfg.spy_ma_days)  # the configured headline gate MA
+        ma_gate = float(ma_gate_s.iloc[-1])
         sma200 = float(ind.sma(close, 200).iloc[-1])
         sma200_prev = float(ind.sma(close, 200).iloc[-6])
         sma50 = float(ind.sma(close, 50).iloc[-1])
@@ -90,11 +93,18 @@ class RegimeModule(MarketModule):
 
         overall = 0.5 * regime + 0.5 * vol
 
-        # --- Hard overrides ---
+        # --- Hard overrides (each promised by config; all enforced here) ---
         veto = False
-        if c < sma200 and not rising_200:
+        if cfg.require_spy_above_ma and c < ma_gate:
+            veto = True
+            reasons.append(f"HARD VETO: SPY below its {cfg.spy_ma_days}-DMA")
+        elif c < sma200 and not rising_200:
             veto = True
             reasons.append("HARD VETO: SPY below a falling 200-DMA")
+
+        if market.vix is not None and market.vix > cfg.vix_max:
+            veto = True
+            reasons.append(f"HARD VETO: VIX {market.vix:.1f} > vix_max {cfg.vix_max:.0f}")
 
         backwardation = (
             market.vix is not None
@@ -114,6 +124,7 @@ class RegimeModule(MarketModule):
             "vol_pillar": round(vol, 1),
             "vol_degraded": vol_degraded,
             "spy_close": round(c, 2),
+            "spy_ma_gate": round(ma_gate, 2),
             "spy_sma200": round(sma200, 2),
             "spy_sma50": round(sma50, 2),
             "rising_200dma": rising_200,

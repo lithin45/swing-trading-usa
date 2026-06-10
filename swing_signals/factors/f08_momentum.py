@@ -41,6 +41,11 @@ if TYPE_CHECKING:
 MIN_BARS = 260  # ~252 for the 52-week high + the 12-1 (252-bar) shift, plus a buffer
 ELIGIBLE_NH = 0.75  # long-eligible only within 25% of the 52-week high
 
+# Component blend (sums to 1), 52-week-high distance dominant. Module-level so
+# research scripts can run pre-registered ranking variants (e.g. 12-1-dominant)
+# without forking the factor; production behavior is unchanged unless edited here.
+W_NH, W_121, W_TREND, W_ROC = 0.40, 0.30, 0.20, 0.10
+
 
 def _clip(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
@@ -108,7 +113,7 @@ class MomentumFactor(Factor):
         else:
             s_trend = 15.0
 
-        score = 0.40 * s_nh + 0.30 * s_121 + 0.20 * s_trend + 0.10 * s_roc
+        score = W_NH * s_nh + W_121 * s_121 + W_TREND * s_trend + W_ROC * s_roc
         eligible = bool(stacked and mom_12_1 > 0.0 and nh >= ELIGIBLE_NH)
 
         reasons: list[str] = []

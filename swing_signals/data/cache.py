@@ -40,9 +40,21 @@ class OHLCVCache:
             return None
 
     def put(self, symbol: str, df: pd.DataFrame | None) -> None:
+        """UNION-merge new bars into the cached frame — the cache never loses bars.
+
+        Daily runs fetch ~400 days, backtests fetch deep past windows, and a
+        throttled provider can return a degenerate partial frame; a plain
+        overwrite (or a prepend-only merge) lets any of those truncate a
+        multi-year cache. The union keeps every disjoint range ever cached; new
+        bars win on overlapping dates (re-fetches carry fresher adjusted prices).
+        """
         if df is None or len(df) == 0:
             return
         try:
+            old = self.get(symbol)
+            if old is not None and len(old) > 0:
+                df = pd.concat([old, df]).sort_index()
+                df = df[~df.index.duplicated(keep="last")]
             df.to_parquet(self._path(symbol))
         except Exception as exc:  # noqa: BLE001 - caching is best-effort
             log.warning("cache write failed for %s (%s)", symbol, exc)

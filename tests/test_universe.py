@@ -82,6 +82,7 @@ def test_engine_caps_correlated_sector():
     s = load_settings()
     s.risk.max_per_sector = 1
     s.risk.max_positions = 10
+    s.scoring.max_extension_atr = 0.0  # gate under test elsewhere
     ctx = RunContext(settings=s, secrets=load_secrets(), trading_day=ASOF, equity=s.account.equity)
     data = {}
     for sym, sec in [("AAA", "semis"), ("BBB", "semis"), ("CCC", "energy")]:
