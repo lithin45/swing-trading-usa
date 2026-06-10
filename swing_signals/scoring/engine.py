@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from ..context import RunContext, SymbolData
     from ..factors.base import SubScore
     from ..market.base import MarketState
+    from .budget import BudgetState
 
 _TIER_MULT = {"High": 1.0, "Medium": 0.66, "Low": 0.33, "None": 0.0}
 
@@ -132,6 +133,7 @@ def generate_signals(
     ctx: RunContext,
     regime: MarketState,
     macro_multiplier: float = 1.0,
+    budget: BudgetState | None = None,
 ) -> EngineResult:
     settings = ctx.settings
     weights = settings.active_factor_weights()
@@ -181,6 +183,38 @@ def generate_signals(
                 explanation=f"{ticker}: no-trade — {why}",
             ))
             continue
+
+        # --- hard gate: post-stop cooldown (budget policy) — a name that just
+        # stopped out may not re-signal until the cooldown lapses; noise re-entries
+        # are how one hot name burns the month's budget.
+        if budget is not None and budget.enabled and ticker in budget.cooldown_blocked:
+            no_trades.append(Signal(
+                ticker=ticker, signal_date=sig_date, direction="NO-TRADE",
+                conviction_score=round(score, 1), conviction_tier="None",
+                regime_state=regime.state, factor_contributions=attribution,
+                agreement_score=round(agreement, 2), flags=flags + ["COOLDOWN"],
+                reasons=reasons,
+                explanation=f"{ticker}: no-trade — in post-stop cooldown",
+            ))
+            continue
+
+        # --- hard gate: earnings proximity — a multi-day holder must not OPEN into
+        # a print (a 3-ATR stop cannot contain an earnings gap). Live populates
+        # next_earnings from the calendar provider; None (backtest / no key) is inert.
+        ecfg = getattr(settings, "earnings", None)
+        if ecfg is not None and ecfg.enabled and sd.next_earnings is not None:
+            days_to_print = (sd.next_earnings - sig_date).days
+            if 0 <= days_to_print <= ecfg.veto_days_before:
+                no_trades.append(Signal(
+                    ticker=ticker, signal_date=sig_date, direction="NO-TRADE",
+                    conviction_score=round(score, 1), conviction_tier="None",
+                    regime_state=regime.state, factor_contributions=attribution,
+                    agreement_score=round(agreement, 2), flags=flags + ["EARNINGS_SOON"],
+                    reasons=reasons,
+                    explanation=(f"{ticker}: no-trade — earnings {sd.next_earnings} "
+                                 f"in {days_to_print}d (veto ≤{ecfg.veto_days_before}d)"),
+                ))
+                continue
 
         # --- hard gate: momentum eligibility (long-only into strength) ---
         # When the momentum factor is active it must confirm a long-eligible name
@@ -337,14 +371,31 @@ def generate_signals(
             flags=flags, reasons=reasons, explanation=explanation,
         ))
 
-    # --- rank LONGs and cap to the position / portfolio-heat budget ---
+    # --- rank LONGs and cap to the monthly budget / position / heat limits ---
     actionable.sort(key=lambda s: s.conviction_score, reverse=True)
     selected: list[Signal] = []
     heat = 0.0
     heat_cap = settings.risk.portfolio_heat_cap
     sector_counts: dict[str, int] = {}
     max_per_sector = settings.risk.max_per_sector
+    new_this_run = 0  # budget charge: distinct NEW symbols (re-prints of held names are free)
     for sig in actionable:
+        # The prime directive first: the calendar-month ceiling is hard. Symbols
+        # charged earlier this month plus today's NEW names never exceed the cap;
+        # a re-emission of an already-charged or still-held name passes free.
+        if (
+            budget is not None and budget.enabled
+            and budget.charges_budget(sig.ticker)
+            and new_this_run >= budget.remaining
+        ):
+            sig.flags.append("BUDGET_EXHAUSTED")
+            no_trades.append(sig_to_no_trade(
+                sig,
+                f"monthly entry budget exhausted "
+                f"({budget.entries_this_month + new_this_run}"
+                f"/{budget.max_entries_per_month} this month)",
+            ))
+            continue
         if len(selected) >= settings.risk.max_positions:
             sig.flags.append("CAPPED_MAX_POSITIONS")
             no_trades.append(sig_to_no_trade(sig, "max positions reached"))
@@ -364,6 +415,8 @@ def generate_signals(
         heat += sig.suggested_risk_pct or 0
         if sd_sec:
             sector_counts[sd_sec] = sector_counts.get(sd_sec, 0) + 1
+        if budget is not None and budget.enabled and budget.charges_budget(sig.ticker):
+            new_this_run += 1
         sig.rank = len(selected) + 1
         selected.append(sig)
 

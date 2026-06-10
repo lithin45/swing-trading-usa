@@ -68,6 +68,35 @@ def _reveal(secret):
     return secret.get_secret_value() if secret is not None else None
 
 
+def _fetch_earnings(settings: Settings, secrets: Secrets, today: date) -> dict[str, date] | None:
+    """Upcoming prints for the earnings-exit check (one bulk call; None = unscreened)."""
+    ecfg = getattr(settings, "earnings", None)
+    if ecfg is None or not ecfg.enabled or not ecfg.exit_before_earnings:
+        return None
+    from ..data.earnings import EarningsCalendar
+
+    cal = EarningsCalendar(_reveal(secrets.finnhub_api_key))
+    if not cal.available:
+        return None  # the signal run already warns loudly about the missing key
+    dates = cal.upcoming(today, today + timedelta(days=ecfg.veto_days_before + 4))
+    if dates is None:
+        log.warning("manage: earnings calendar unavailable — no earnings exits this run")
+    return dates
+
+
+def _earnings_exit_due(
+    settings: Settings, earnings: dict[str, date] | None, symbol: str, today: date
+) -> bool:
+    """True when ``symbol`` prints within the veto window — exit before the gap risk."""
+    if earnings is None:
+        return False
+    ed = earnings.get(symbol)
+    if ed is None:
+        return False
+    ecfg = settings.earnings
+    return 0 <= (ed - today).days <= ecfg.veto_days_before
+
+
 def _bars_held(entry_date: date | None, today: date) -> int:
     if entry_date is None:
         return 0
@@ -114,6 +143,7 @@ def reconcile_and_manage(
     loader = loader if loader is not None else DataLoader(settings, secrets)
     positions = {p.symbol: p for p in broker.list_positions()}
     now = datetime.now()
+    earnings = _fetch_earnings(settings, secrets, today)
 
     with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
         worklist = repo.active_trades(session)
@@ -127,7 +157,7 @@ def reconcile_and_manage(
                         _sync_pending(broker, settings, trade, today, now, report, dry_run)
                 elif trade.status == "open":
                     args = (broker, settings, trade, today, now, positions, loader,
-                            report, dry_run, offline)
+                            report, dry_run, offline, earnings)
                     if settings.exits.mode == "staged":
                         _manage_open_staged(*args)
                     elif bracket:
@@ -321,9 +351,10 @@ def _sync_pending(broker, settings, trade, today, now, report, dry_run) -> None:
 
 
 def _manage_open(
-    broker, settings, trade, today, now, positions, loader, report, dry_run, offline
+    broker, settings, trade, today, now, positions, loader, report, dry_run, offline,
+    earnings: dict[str, date] | None = None,
 ) -> None:
-    """Open position: exit on stop / target / time-stop, then ratchet the trail.
+    """Open position: exit on stop / target / time-stop / earnings, then ratchet the trail.
 
     The exit decision tests the bar against the stop as it stood BEFORE this bar —
     that is where the resting protective order actually was all session — and only
@@ -360,6 +391,11 @@ def _manage_open(
         )
     if reason is None and _bars_held(trade.entry_fill_date, today) >= bro.max_hold_bars:
         reason = "time_exit"
+    if reason is None and _earnings_exit_due(settings, earnings, trade.symbol, today):
+        reason = "earnings_exit"
+        log.info("%s: earnings %s within %dd — exiting before the print",
+                 trade.symbol, (earnings or {}).get(trade.symbol),
+                 settings.earnings.veto_days_before)
 
     if reason is not None:
         if not dry_run and _submit_exit_all(broker, trade, today, now, reason) == "closed":
@@ -406,7 +442,8 @@ def _submit_exit_all(broker, trade, today, now, reason, *, suffix: str = "exit")
 
 
 def _manage_open_staged(
-    broker, settings, trade, today, now, positions, loader, report, dry_run, offline
+    broker, settings, trade, today, now, positions, loader, report, dry_run, offline,
+    earnings: dict[str, date] | None = None,
 ) -> None:
     """Staged exits on a live position: partial at target, breakeven, trail, conditional time-stop.
 
@@ -450,6 +487,20 @@ def _manage_open_staged(
     rps = trade.risk_per_share or 0.0
     if rps <= 0 and entry and trade.stop_price is not None:
         rps = entry - trade.stop_price
+
+    # Earnings exit pre-empts everything price-based: the gap risk exists whether or
+    # not the latest bar is fresh, and a partial-scaled runner is still exposed.
+    if _earnings_exit_due(settings, earnings, trade.symbol, today):
+        log.info("%s: earnings %s within %dd — exiting before the print",
+                 trade.symbol, (earnings or {}).get(trade.symbol),
+                 settings.earnings.veto_days_before)
+        if not dry_run and _submit_exit_all(
+            broker, trade, today, now, "earnings_exit"
+        ) == "closed":
+            report.closed.append(trade.symbol)
+        else:
+            report.exits_submitted.append((trade.symbol, "earnings_exit"))
+        return
 
     # Decide against the PRIOR effective stop (where the resting order actually was);
     # the chandelier is ratcheted after, for the next session — mirrors the backtest's
@@ -644,9 +695,10 @@ def _sync_pending_bracket(broker, settings, trade, today, now, report, dry_run) 
 
 
 def _manage_open_bracket(
-    broker, settings, trade, today, now, positions, loader, report, dry_run, offline
+    broker, settings, trade, today, now, positions, loader, report, dry_run, offline,
+    earnings: dict[str, date] | None = None,
 ) -> None:
-    """Open bracketed position: trail the stop leg; time-stop manually; reconcile OCO fills."""
+    """Open bracketed position: trail the stop leg; time/earnings-stop manually; reconcile OCO."""
     pos = positions.get(trade.symbol)
     if pos is None:  # a child leg (stop or target) filled — reconcile P&L
         _reconcile_bracket_exit(broker, trade, today, now, report, dry_run)
@@ -666,8 +718,17 @@ def _manage_open_bracket(
             if trade.stop_loss_order_id:
                 broker.replace_stop(trade.stop_loss_order_id, stop_price=eff)  # non-fatal
 
-    # 2) time-stop (brackets don't expire): cancel the OCO legs, then market-sell
+    # 2) time-stop (brackets don't expire) or earnings exit: cancel the OCO legs,
+    #    then market-sell what is still held.
+    reason = None
     if _bars_held(trade.entry_fill_date, today) >= bro.max_hold_bars:
+        reason = "time_exit"
+    elif _earnings_exit_due(settings, earnings, trade.symbol, today):
+        reason = "earnings_exit"
+        log.info("%s: earnings %s within %dd — exiting before the print",
+                 trade.symbol, (earnings or {}).get(trade.symbol),
+                 settings.earnings.veto_days_before)
+    if reason is not None:
         if not dry_run:
             for oid in (trade.take_profit_order_id, trade.stop_loss_order_id):
                 if oid:
@@ -682,10 +743,10 @@ def _manage_open_bracket(
                 trade.symbol, qty=live.qty, order_type="market", client_order_id=coid
             )
             trade.exit_order_id = o.id
-            trade.exit_reason = "time_exit"
+            trade.exit_reason = reason
             trade.status = "closing"
             trade.updated_at = now
-        report.exits_submitted.append((trade.symbol, "time_exit"))
+        report.exits_submitted.append((trade.symbol, reason))
 
 
 def _reconcile_bracket_exit(broker, trade, today, now, report, dry_run) -> None:

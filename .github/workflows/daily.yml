@@ -9,6 +9,12 @@ on:
     - cron: "30 21 * * 1-5"
   workflow_dispatch: {}  # allow manual runs from the Actions tab
 
+# Same group as intraday.yml: a daily run never overlaps an intraday manage pass
+# (overlapping manage runs can briefly duplicate protective stops — audit P1 #7).
+concurrency:
+  group: swing-manage
+  cancel-in-progress: false
+
 # GitHub disables scheduled workflows after 60 days with no repo activity; a manual
 # run or any commit resets that. healthchecks.io (below) is the real dead-man's switch.
 
@@ -65,13 +71,15 @@ jobs:
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_URL }}
         run: swing-signals trade
 
-      # 3) Reconcile fills, trail stops, exit, snapshot the account. ALWAYS runs —
-      # a failed signal/entry step must never leave open positions unmanaged.
+      # 3) Reconcile fills, trail stops, exit (incl. before-earnings), snapshot the
+      # account. ALWAYS runs — a failed signal/entry step must never leave open
+      # positions unmanaged. Finnhub key feeds the earnings-exit calendar check.
       - name: Manage open positions
         if: always()
         env:
           SWING_ALPACA_API_KEY: ${{ secrets.SWING_ALPACA_API_KEY }}
           SWING_ALPACA_SECRET_KEY: ${{ secrets.SWING_ALPACA_SECRET_KEY }}
+          SWING_FINNHUB_API_KEY: ${{ secrets.SWING_FINNHUB_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_URL }}
         run: swing-signals manage

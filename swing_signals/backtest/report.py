@@ -63,7 +63,8 @@ def format_backtest_report(
     )
     lines.append(
         f"Entry model: {result.n_unfilled} limits never filled, "
-        f"{result.n_capped} skipped by position/heat caps"
+        f"{result.n_capped} skipped by position/heat caps, "
+        f"{result.n_budget_deferred} deferred by the monthly budget"
     )
     lines.append("")
 
@@ -80,6 +81,31 @@ def format_backtest_report(
     lines.append(f"  Sortino      {m['sortino']:.3f}")
     lines.append(f"  Calmar       {m['calmar']}")
     lines.append("")
+
+    cad = m.get("cadence") or {}
+    if cad.get("entries_by_month"):
+        cap = cad.get("budget_cap")
+        lines.append(
+            "ENTRY CADENCE (entry submissions charged per calendar month"
+            + (f"; ceiling {cap}" if cap is not None else "; budget off") + ")"
+        )
+        lines.append("-" * 40)
+        fills = cad.get("fills_by_month", {})
+        for month, n_e in cad["entries_by_month"].items():
+            bar = "#" * n_e
+            over = "  ⚠ OVER CAP" if (cap is not None and n_e > cap) else ""
+            lines.append(
+                f"  {month}  {n_e:>2} entries ({fills.get(month, 0):>2} filled)  {bar}{over}"
+            )
+        lines.append(
+            f"  max {cad['entries_per_month_max']}/month, "
+            f"mean {cad['entries_per_month_mean']}/month"
+            + (
+                f", months over cap: {cad['months_over_cap']}"
+                if cad.get("months_over_cap") is not None else ""
+            )
+        )
+        lines.append("")
 
     lines.append("FILE-11 GATE CHECKS (advance only if all pass)")
     lines.append("-" * 40)

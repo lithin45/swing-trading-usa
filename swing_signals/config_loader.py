@@ -228,6 +228,34 @@ class SizingCfg(StrictModel):
     vol_scalar_max: float = Field(default=1.0, gt=0, le=1)  # ceiling (never upsize)
 
 
+class BudgetCfg(StrictModel):
+    """The prime directive (mandate §4): a hard ceiling on NEW entries per calendar month.
+
+    The ceiling counts EMITTED BUY signals (what the alert tells you to do and what the
+    paper broker acts on) — conservative: an emitted-but-unfilled entry still consumes
+    budget. The cooldown bars a name from re-signaling right after it stopped out, the
+    classic way one hot name burns the month's budget on noise.
+    """
+
+    enabled: bool = True
+    max_entries_per_month: int = Field(default=7, ge=1, le=100)
+    cooldown_days: int = Field(default=10, ge=0, le=90)  # calendar days after a stop-out
+
+
+class EarningsCfg(StrictModel):
+    """Earnings-date handling for a multi-day holder (strategy review 2026-06-10 §5 T1).
+
+    A 3-ATR stop cannot contain an overnight earnings gap (a −15% print is a −3R to −5R
+    realized loss), so the system must not OPEN within ``veto_days_before`` calendar days
+    of a confirmed print, and ``manage`` exits open positions before one. Calendar data is
+    key-gated (Finnhub); when unavailable the run proceeds unscreened but warns loudly.
+    """
+
+    enabled: bool = True
+    veto_days_before: int = Field(default=3, ge=0, le=30)   # no new entries within N days
+    exit_before_earnings: bool = True                       # manage: close before the print
+
+
 class Settings(StrictModel):
     """Top-level validated configuration."""
 
@@ -246,6 +274,12 @@ class Settings(StrictModel):
     exits: ExitsCfg = Field(default_factory=ExitsCfg)
     # Volatility-scaled sizing — defaulted so configs without a `sizing:` block still load.
     sizing: SizingCfg = Field(default_factory=SizingCfg)
+    # Monthly entry budget + cooldown — defaulted ON (the mandate's ceiling must not
+    # depend on a config block existing). Enforcement still requires the caller to
+    # build budget state (live: from the DB; backtest: from sim state).
+    budget: BudgetCfg = Field(default_factory=BudgetCfg)
+    # Earnings-date veto/exit — defaulted ON; inert without a Finnhub key (warns loudly).
+    earnings: EarningsCfg = Field(default_factory=EarningsCfg)
     # Broker config is optional — old configs without a `broker:` section still load, and
     # `broker is None or not broker.enabled` means signal-only (the current behavior).
     broker: BrokerCfg | None = None

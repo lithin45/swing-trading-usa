@@ -36,7 +36,7 @@ def configure_logging(level: str) -> None:
 
 
 def _persist(settings: Settings, today: date, result, secrets: Secrets | None = None) -> None:
-    """Best-effort write of the run + its signals to the DB (never fails the run)."""
+    """Best-effort write of the run + its signals/rejections to the DB (never fails the run)."""
     try:
         from .config_loader import resolve_db_url
         from .persistence.repository import persist_daily_run
@@ -47,10 +47,73 @@ def _persist(settings: Settings, today: date, result, secrets: Secrets | None = 
         )
         return
     try:
-        n = persist_daily_run(settings, today, result.actionable, secrets=secrets)
+        n = persist_daily_run(
+            settings, today, result.actionable, secrets=secrets, no_trades=result.no_trades
+        )
         log.info("persisted %d signal(s) to %s", n, resolve_db_url(settings, secrets))
     except Exception as exc:  # noqa: BLE001 - a DB error must not fail the signal run
         log.warning("persistence failed (continuing): %s", exc)
+
+
+def _build_budget_state(settings: Settings, secrets: Secrets, today: date):
+    """Budget state from the DB, degrading loudly: a DB/dependency failure can lose the
+    cross-day count (today still can't exceed the cap), never the whole ceiling."""
+    if not settings.budget.enabled:
+        return None
+    from .scoring.budget import BudgetState  # dependency-free dataclass
+
+    fallback = BudgetState(
+        enabled=True, max_entries_per_month=settings.budget.max_entries_per_month
+    )
+    try:
+        from .config_loader import resolve_db_url
+        from .persistence.db import make_engine, session_scope
+        from .scoring.budget import build_budget_state
+    except ImportError:
+        log.warning(
+            "budget enabled but SQLAlchemy not installed — month-to-date entries unknown; "
+            "today is still capped at %d", fallback.max_entries_per_month,
+        )
+        return fallback
+    try:
+        with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
+            return build_budget_state(settings, session, today)
+    except Exception as exc:  # noqa: BLE001 - budget query failure must not kill the run
+        log.warning(
+            "budget state query failed (%s) — month-to-date entries unknown; "
+            "today is still capped at %d", exc, fallback.max_entries_per_month,
+        )
+        return fallback
+
+
+def _attach_earnings(settings: Settings, secrets: Secrets, data, today: date,
+                     *, offline: bool) -> None:
+    """Populate ``SymbolData.next_earnings`` from the calendar (loud when unscreened)."""
+    if not settings.earnings.enabled:
+        return
+    from datetime import timedelta
+
+    from .data.earnings import EarningsCalendar
+
+    cal = EarningsCalendar(
+        secrets.finnhub_api_key.get_secret_value() if secrets.finnhub_api_key else None
+    )
+    if not cal.available:
+        log.warning("earnings veto enabled but no Finnhub key — entries not earnings-screened")
+        return
+    if offline:
+        log.warning("offline run — entries not earnings-screened")
+        return
+    window_end = today + timedelta(days=settings.earnings.veto_days_before + 4)
+    edates = cal.upcoming(today, window_end)
+    if edates is None:
+        log.warning("earnings calendar unavailable — entries not earnings-screened today")
+        return
+    hits = 0
+    for sym, sd in data.items():
+        sd.next_earnings = edates.get(sym)
+        hits += 1 if sd.next_earnings is not None else 0
+    log.info("earnings calendar: %d upcoming print(s) within %s", hits, window_end)
 
 
 def _maybe_brief(settings: Settings, secrets: Secrets, today: date, regime, macro, result) -> None:
@@ -138,6 +201,7 @@ def run(
     smap = sector_map()
     for sym, sd in data.items():
         sd.sector = smap.get(sym)  # feeds the correlation cap
+    _attach_earnings(settings, secrets, data, today, offline=offline)  # feeds EARNINGS_SOON
     passed = [s for s, sd in data.items() if sd.ok]
     skipped = {s: sd.issues for s, sd in data.items() if not sd.ok}
     log.info("watchlist data: %d/%d symbols passed quality gate", len(passed), len(symbols))
@@ -164,7 +228,10 @@ def run(
     if missing:
         log.info("factors awaiting later stages/keys (excluded from composite): %s", missing)
 
-    result = generate_signals(data, ctx, regime, macro_multiplier=macro.multiplier)
+    budget_state = _build_budget_state(settings, secrets, today)
+    result = generate_signals(
+        data, ctx, regime, macro_multiplier=macro.multiplier, budget=budget_state
+    )
     log.info("signals: %d actionable LONG, %d no-trade",
              len(result.actionable), len(result.no_trades))
 

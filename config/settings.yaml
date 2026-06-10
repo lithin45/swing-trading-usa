@@ -100,6 +100,26 @@ exits:
   stagnation_min_r: 1.0             # "working" = up at least this many R
   hard_backstop_bars: 60            # absolute max hold (never carry a position past this)
 
+# Trade budget — the prime directive (mandate §4): ≤ max_entries_per_month NEW entries
+# per calendar month as a HARD ceiling (never a quota). Counts EMITTED BUY signals
+# (signal_date in the month), so the Telegram report, the paper broker, and the backtest
+# all respect the same ceiling. cooldown_days bars a name from re-signaling right after
+# a stop-out (noise re-entry burns budget). Enforced in the signal engine; mirrored in
+# the backtester so reported cadence is honest.
+budget:
+  enabled: true
+  max_entries_per_month: 7
+  cooldown_days: 10            # calendar days after a stop-out before a name may re-signal
+
+# Earnings-date handling (strategy review 2026-06-10 §5 Tier 1). A 3-ATR stop cannot
+# contain an overnight earnings gap, so: no new entries within veto_days_before calendar
+# days of a confirmed print, and `manage` exits open positions before one. Needs
+# SWING_FINNHUB_API_KEY; without it the run proceeds unscreened and warns loudly.
+earnings:
+  enabled: true
+  veto_days_before: 3
+  exit_before_earnings: true
+
 # Volatility-scaled sizing (swing_signals/risk/vol_sizing.py). Shrinks size for high-
 # volatility names and in high-volatility markets — the one robustly evidenced risk
 # technique for momentum (~doubles risk-adjusted return). Only ever reduces size.
