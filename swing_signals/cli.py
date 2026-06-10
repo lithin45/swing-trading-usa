@@ -34,9 +34,24 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Per-side cost in basis points (overrides config, default 10)")
     bt_p.add_argument("--walk-forward", type=int, default=0, metavar="N_FOLDS",
                       help="Number of rolling walk-forward folds (0 = disabled)")
+    bt_p.add_argument("--universe", choices=["watchlist", "sp500"], default="watchlist",
+                      help="watchlist = the static symbols list (fast); sp500 = "
+                           "point-in-time S&P 500 membership (the broad universe live trades)")
+    bt_p.add_argument("--include-themes", action="store_true",
+                      help="With --universe sp500: also include the curated thematic names "
+                           "(AI/quantum/data-center). NOTE: the theme list is today's curation "
+                           "— it adds back selection bias and is for live-parity exploration, "
+                           "not validation.")
     bt_p.add_argument("--offline", action="store_true",
                       help="Use cached data only; never hit the network.")
     bt_p.add_argument("--config", default=None, metavar="PATH")
+
+    # ---- refresh-sp500 (operator command: rewrite the committed membership CSVs) ----
+    sub.add_parser(
+        "refresh-sp500",
+        help="Fetch Wikipedia's S&P 500 page and rewrite config/sp500.csv + "
+             "config/sp500_changes.csv (review + commit the diff)",
+    )
 
     # ---- track (outcome tracker) ----
     tr_p = sub.add_parser("track", help="Resolve open signals' outcomes against fresh prices")
@@ -92,6 +107,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
+    if args.command == "refresh-sp500":
+        from .universe.membership import refresh_from_wikipedia
+        try:
+            n_members, n_events = refresh_from_wikipedia()
+        except Exception as exc:  # noqa: BLE001 - operator command: report and exit nonzero
+            print(f"refresh-sp500 failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"wrote config/sp500.csv ({n_members} members) and "
+              f"config/sp500_changes.csv ({n_events} change events) — review + commit")
+        return 0
+
     if args.command == "backtest":
         return run_backtest(
             settings=settings,
@@ -101,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
             cost_bps=args.cost_bps,
             walk_forward_folds=args.walk_forward,
             offline=args.offline,
+            universe=args.universe,
+            include_themes=args.include_themes,
         )
 
     # The dead-man's switch must cover EVERY scheduled command, not just the signal

@@ -12,6 +12,7 @@ logic = slicing + execution + position tracking; signal logic = unchanged code.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
@@ -119,6 +120,11 @@ class BacktestRunner:
         ohlcv_all: dict[str, pd.DataFrame],
         index_ohlcv: dict[str, pd.DataFrame],
         secrets: Secrets,
+        *,
+        universe_asof: Callable[[date], frozenset[str] | None] | None = None,
+        sector_of: dict[str, str] | None = None,
+        vix_series: pd.Series | None = None,
+        vix3m_series: pd.Series | None = None,
     ) -> None:
         self.settings = settings
         self.bt_cfg = bt_cfg
@@ -127,6 +133,14 @@ class BacktestRunner:
         self.secrets = secrets
         self.costs = CostModel(per_side_bps=bt_cfg.cost_bps)
         self._panels: dict[str, pd.DataFrame] = {}  # per-symbol precomputed indicator panel
+        # Point-in-time universe filter (None = every loaded symbol, the old behavior)
+        # + the symbol->sector map that arms the live correlation cap in the engine.
+        self.universe_asof = universe_asof
+        self.sector_of = sector_of or {}
+        # Historical VIX/VIX3M (FRED), sliced per bar so the regime gate sees the real
+        # vol level (vix_max veto, backwardation) instead of only the SPY-ATR% proxy.
+        self._vix = _clean_series(vix_series)
+        self._vix3m = _clean_series(vix3m_series)
         # Exit rules (legacy/staged) + a per-symbol chandelier trail series (staged only).
         self.rules = build_rules(settings, bt_cfg.max_hold_bars)
         self._staged = getattr(getattr(settings, "exits", None), "mode", "legacy") == "staged"
@@ -414,20 +428,30 @@ class BacktestRunner:
     def _build_symbol_data(self, asof: date) -> dict[str, SymbolData]:
         """Return SymbolData sliced to bars <= asof (no lookahead).
 
-        For symbols with enough history, attach the precomputed indicator row at
-        ``asof`` (built once per symbol) so the technical factor reads O(1) scalars
-        rather than recomputing every indicator over the slice on each bar.
+        With a point-in-time universe, only symbols that were ACTUALLY members on
+        ``asof`` are scored — the broad backtest must not hand the engine names the
+        live screen could not have seen that day. For symbols with enough history,
+        attach the precomputed indicator row at ``asof`` (built once per symbol) so
+        the technical factor reads O(1) scalars rather than recomputing every
+        indicator over the slice on each bar.
         """
         ts = pd.Timestamp(asof)
+        allowed = self.universe_asof(asof) if self.universe_asof is not None else None
         result: dict[str, SymbolData] = {}
         for ticker, df in self.ohlcv_all.items():
+            if allowed is not None and ticker not in allowed:
+                continue
             if df is None or len(df) == 0:
                 sd = SymbolData(symbol=ticker)
                 sd.issues.append(f"{ticker}: no OHLCV in backtest cache")
                 result[ticker] = sd
                 continue
             sliced = _slice_to(df, asof)
-            sd = SymbolData(symbol=ticker, ohlcv=sliced if len(sliced) > 0 else None)
+            sd = SymbolData(
+                symbol=ticker,
+                ohlcv=sliced if len(sliced) > 0 else None,
+                sector=self.sector_of.get(ticker),
+            )
             if sd.ohlcv is None or len(sd.ohlcv) < self.bt_cfg.warmup_bars:
                 sd.issues.append(f"{ticker}: insufficient bars at {asof}")
             else:
@@ -448,13 +472,12 @@ class BacktestRunner:
     def _build_market_context(self, asof: date) -> MarketContext:
         """Return MarketContext with index data sliced to <= asof.
 
-        VIX/VIX3M are left as ``None`` so the regime module runs its own SPY-ATR%
-        volatility proxy — the *identical* code path the live engine uses when no
-        FRED key is present, so backtest regime calls match live regime calls.
-        (Previously this synthesized a notional VIX from ATR% and fed it through
-        the VIX-level bins, a different transfer function than live. For higher
-        fidelity a future version can feed real historical VIX from FRED — VIXCLS
-        has history back to 1990 — sliced per bar.)
+        VIX/VIX3M come from the real FRED history when the runner was given it —
+        the last published value on/before ``asof`` (day-``asof`` close counts: the
+        signal is computed on that close, same convention as the SPY bar) — so the
+        regime's vix_max veto and backwardation penalty replay history. Without
+        the series, both stay ``None`` and the regime module runs its SPY-ATR%
+        proxy, the identical code path live uses when no FRED key is present.
         """
         def _s(sym: str) -> pd.DataFrame | None:
             df = self.index_ohlcv.get(sym)
@@ -463,7 +486,11 @@ class BacktestRunner:
             sl = _slice_to(df, asof)
             return sl if len(sl) >= self.bt_cfg.warmup_bars else None
 
-        return MarketContext(spy=_s("SPY"), qqq=_s("QQQ"), iwm=_s("IWM"))
+        return MarketContext(
+            spy=_s("SPY"), qqq=_s("QQQ"), iwm=_s("IWM"),
+            vix=_series_asof(self._vix, asof),
+            vix3m=_series_asof(self._vix3m, asof),
+        )
 
     def _check_exits(
         self, positions: dict[str, _OpenPosition], bar: date
@@ -568,6 +595,25 @@ class BacktestRunner:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+def _clean_series(s: pd.Series | None) -> pd.Series | None:
+    """Drop NaNs and normalize the index to Timestamps, sorted ascending."""
+    if s is None or len(s) == 0:
+        return None
+    s = s.dropna()
+    if len(s) == 0:
+        return None
+    s.index = pd.to_datetime(s.index)
+    return s.sort_index()
+
+
+def _series_asof(s: pd.Series | None, asof: date) -> float | None:
+    """Last value of ``s`` on/before ``asof`` (None if absent or all-future)."""
+    if s is None:
+        return None
+    sl = s.loc[: pd.Timestamp(asof)]
+    return float(sl.iloc[-1]) if len(sl) else None
+
 
 def _slice_to(df: pd.DataFrame, asof: date) -> pd.DataFrame:
     """Return rows whose DatetimeIndex date <= asof (no lookahead).

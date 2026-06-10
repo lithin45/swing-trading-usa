@@ -234,3 +234,30 @@ def test_limit_entry_fills_only_when_touched():
         "limit entries filled inside the runaway-gap regime where low never touched the limit"
     )
     assert res.n_unfilled > 0  # the aged-out orders are counted, not silently dropped
+
+
+def test_universe_asof_filter_blocks_pre_membership_entries():
+    """A name that joined the index mid-window must not trade before its join date."""
+    join_day = date(2022, 7, 1)
+    df = _ohlcv("2020-01-01", n=800, close_start=50, slope=0.3)
+    runner = _mini_runner({"AAPL": df})
+    runner.universe_asof = lambda d: frozenset({"AAPL"}) if d >= join_day else frozenset()
+    res = runner.run(date(2022, 1, 1), date(2022, 12, 31))
+    assert res.trades, "expected trades after the join date"
+    assert all(t.signal_date >= join_day for t in res.trades)
+
+
+def test_vix_series_hard_veto_blocks_all_entries():
+    """Historical VIX above vix_max must veto every entry; calm VIX must not."""
+    df = _ohlcv("2020-01-01", n=800, close_start=50, slope=0.3)
+    idx = pd.bdate_range(start="2020-01-01", periods=800)
+
+    stressed = _mini_runner({"AAPL": df})
+    stressed._vix = pd.Series(35.0, index=idx)  # > vix_max 28 every day
+    res_stressed = stressed.run(date(2022, 1, 1), date(2022, 12, 31))
+    assert res_stressed.trades == []
+
+    calm = _mini_runner({"AAPL": df})
+    calm._vix = pd.Series(12.0, index=idx)
+    res_calm = calm.run(date(2022, 1, 1), date(2022, 12, 31))
+    assert len(res_calm.trades) > 0

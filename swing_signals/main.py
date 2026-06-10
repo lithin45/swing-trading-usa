@@ -194,9 +194,12 @@ def run_backtest(
     cost_bps: float | None = None,
     walk_forward_folds: int = 0,
     offline: bool = False,
+    universe: str = "watchlist",
+    include_themes: bool = False,
 ) -> int:
     """Run the Stage-5 backtest harness. Returns process exit code."""
     from datetime import date as _date
+    from datetime import timedelta as _timedelta
 
     from .backtest.config import BacktestCfg
     from .backtest.report import format_backtest_report
@@ -222,27 +225,75 @@ def run_backtest(
     end = _date.fromisoformat(bt_cfg.end) if bt_cfg.end != "today" else _date.today()
 
     log.info(
-        "backtest | %s → %s | cost %.1f bps/side | max_hold %d bars | offline=%s",
-        start, end, bt_cfg.cost_bps, bt_cfg.max_hold_bars, offline,
+        "backtest | %s → %s | cost %.1f bps/side | max_hold %d bars | universe=%s | offline=%s",
+        start, end, bt_cfg.cost_bps, bt_cfg.max_hold_bars, universe, offline,
     )
 
-    # Pull full history for watchlist + indices (cache-first if offline).
     loader = DataLoader(settings, secrets)
-    all_symbols = settings.watchlist.symbols
     index_syms = list(settings.data.index_symbols)
 
+    # Resolve the symbol set + the per-bar membership filter.
+    universe_asof = None
+    sector_of: dict[str, str] | None = None
+    if universe == "sp500":
+        from .universe.membership import members_asof, members_union
+        from .universe.thematic import sector_map, thematic_symbols
+
+        union = members_union(start, end)
+        if union is None:
+            log.error(
+                "--universe sp500 needs config/sp500_changes.csv — run "
+                "`swing-signals refresh-sp500` once (and commit the CSVs)."
+            )
+            return 1
+        themes: frozenset[str] = thematic_symbols() if include_themes else frozenset()
+        all_symbols = sorted(union | themes)
+        sector_of = sector_map()
+        if include_themes:
+            log.warning(
+                "⚠  --include-themes adds TODAY'S curated theme list to history — that is "
+                "selection bias by construction; use for live-parity exploration only."
+            )
+
+        def universe_asof(asof: _date, _themes=themes):  # noqa: ANN202
+            m = members_asof(asof)
+            return (m | _themes) if m is not None else None
+
+        # Deep history for 500+ names is heavy; fetch only what the warmup needs
+        # (~260 trading bars for momentum + slack) instead of 20+ years.
+        fetch_start = (start - _timedelta(days=600)).isoformat()
+    else:
+        all_symbols = settings.watchlist.symbols
+        # Static 10-name list: cheap to fetch deep history; the runner slices.
+        fetch_start = "2000-01-01"
+
     log.info("loading OHLCV for %d symbols + %d indices ...", len(all_symbols), len(index_syms))
-    # Fetch from a far-back start so we capture enough warmup history before bt_start.
-    # yfinance returns 20+ years; the runner filters to [start, end] itself.
-    # In offline mode, the cache returns whatever was stored by the daily run.
-    fetch_start = "2000-01-01"
+    # In offline mode, the cache returns whatever was stored by earlier runs.
     ohlcv_all: dict = {}
-    for sym in all_symbols:
-        df = loader.get_ohlcv(sym, fetch_start, end.isoformat(), offline=offline)
-        if df is not None and len(df) > 0:
-            ohlcv_all[sym] = df
-        else:
-            log.warning("no OHLCV for %s — skipping (no data or offline cache miss)", sym)
+    missing: list[str] = []
+
+    def _fetch(sym: str):
+        try:
+            return sym, loader.get_ohlcv(sym, fetch_start, end.isoformat(), offline=offline)
+        except Exception as exc:  # noqa: BLE001 - one symbol must not kill the load
+            log.debug("fetch failed for %s: %s", sym, exc)
+            return sym, None
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=settings.data.max_workers) as pool:
+        for sym, df in pool.map(_fetch, all_symbols):
+            if df is not None and len(df) > 0:
+                ohlcv_all[sym] = df
+            else:
+                missing.append(sym)
+    if missing:
+        log.warning(
+            "no OHLCV for %d/%d symbols (delisted/renamed/offline-miss) — the backtest "
+            "can select but not trade them; this is the residual survivorship gap%s",
+            len(missing), len(all_symbols),
+            f": {', '.join(sorted(missing)[:15])}{' …' if len(missing) > 15 else ''}",
+        )
 
     index_ohlcv: dict = {}
     for sym in index_syms:
@@ -252,16 +303,37 @@ def run_backtest(
 
     if not ohlcv_all:
         log.error(
-            "No data loaded for any watchlist symbol. "
+            "No data loaded for any universe symbol. "
             "Run without --offline first to populate the cache with historical data, "
             "or check that the backtest date range (%s → %s) overlaps with cached bars.",
             start, end,
         )
         return 1
 
+    # Historical VIX/VIX3M for the regime gate (sliced per bar by the runner). With
+    # no FRED key the runner falls back to the SPY-ATR% proxy, exactly like live.
+    vix_series = vix3m_series = None
+    if not offline:
+        from .data.fred_provider import FredProvider
+
+        fred = FredProvider(
+            secrets.fred_api_key.get_secret_value() if secrets.fred_api_key else None
+        )
+        if fred.available:
+            try:
+                vix_series = fred.get_series(settings.data.fred_series.get("vix", "VIXCLS"))
+                vix3m_series = fred.get_series(settings.data.fred_series.get("vix3m", "VXVCLS"))
+                log.info("historical VIX/VIX3M loaded from FRED for the regime gate")
+            except Exception as exc:  # noqa: BLE001 - degrade to the ATR proxy
+                log.warning("FRED VIX history unavailable (%s) — using the SPY-ATR%% proxy", exc)
+        else:
+            log.info("no FRED key — backtest regime uses the SPY-ATR%% proxy (same as live)")
+
     runner = BacktestRunner(
         settings=settings, bt_cfg=bt_cfg,
         ohlcv_all=ohlcv_all, index_ohlcv=index_ohlcv, secrets=secrets,
+        universe_asof=universe_asof, sector_of=sector_of,
+        vix_series=vix_series, vix3m_series=vix3m_series,
     )
 
     folds = None
