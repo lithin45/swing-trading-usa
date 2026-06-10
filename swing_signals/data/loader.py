@@ -20,7 +20,7 @@ from .cache import OHLCVCache
 from .fred_provider import FredProvider
 from .market import build_market_context
 from .quality import check_ohlcv_quality
-from .retry import PermanentDataError
+from .retry import PermanentDataError, TransientDataError
 from .stooq_provider import StooqProvider
 from .yfinance_provider import YfinanceProvider
 
@@ -96,11 +96,19 @@ class DataLoader:
                 return cached
             raise PermanentDataError(f"offline: no cached data for {symbol}")
 
-        # 3) try providers in order; cache each success.
+        # 3) try providers in order; cache each success. A degenerate response —
+        # a handful of bars against a multi-month request (a throttled yfinance
+        # has returned 1-bar frames) — counts as a failure: the next provider (or
+        # the stale-cache fallback) beats silently acting on a gutted frame.
         errors: list[str] = []
+        req_days = (date.fromisoformat(end[:10]) - date.fromisoformat(start[:10])).days
         for provider in self.providers:
             try:
                 df = provider.get_ohlcv(symbol, start, end)
+                if req_days > 120 and df is not None and len(df) < 20:
+                    raise TransientDataError(
+                        f"degenerate response: {len(df)} bars for a {req_days}-day request"
+                    )
                 self.cache.put(symbol, df)
                 return df
             except Exception as exc:  # noqa: BLE001 - try the next provider

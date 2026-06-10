@@ -96,6 +96,8 @@ def main() -> int:
     ap.add_argument("--variants", default=",".join(VARIANTS))
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--dump-dir", default="/tmp/bt_experiments")
+    ap.add_argument("--max-workers", type=int, default=None,
+                    help="fetch parallelism (lower it for yfinance-heavy deep-past runs)")
     args = ap.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
     names = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -111,6 +113,8 @@ def main() -> int:
 
     sector_of = sector_map()
 
+    if args.max_workers:
+        settings.data.max_workers = args.max_workers
     loader = DataLoader(settings, secrets)
     fetch_start = (start - timedelta(days=600)).isoformat()
 
@@ -225,6 +229,21 @@ def _mut_combo_lncw(s):
 VARIANTS["wide_stop"] = _mut_wide_stop
 VARIANTS["combo_lnc"] = _mut_combo_lnc
 VARIANTS["combo_lncw"] = _mut_combo_lncw
+
+
+# --- 2026-06-10b: settings.yaml now SHIPS the validated combo (3-ATR stop +
+# no-chase gate + legacy exits), so "base" == combo going forward. `old_base`
+# reconstructs the pre-combo config for honest side-by-side runs on new windows.
+
+
+def _mut_old_base(s):
+    s.risk.atr_stop_multiple = 2.0
+    s.scoring.max_extension_atr = 0.0
+    s.exits.mode = "staged"
+    return s
+
+
+VARIANTS["old_base"] = _mut_old_base
 
 
 if __name__ == "__main__":
