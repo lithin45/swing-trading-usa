@@ -17,6 +17,8 @@ def register_builtins() -> dict[str, type]:
     from . import (
         f01_technical,  # noqa: F401  (self-registers on import)
         f02_news_sentiment,  # noqa: F401  (self-disables without a key/news)
+        f08_momentum,  # noqa: F401  (momentum / relative strength — the core edge)
+        f09_setup,  # noqa: F401  (low-weight breakout/pullback entry confirmation)
     )
     from .registry import all_factors
 

@@ -115,8 +115,15 @@ class DataLoader:
         raise PermanentDataError(f"all providers failed for {symbol}: {errors}")
 
     # -- public API ---------------------------------------------------------
-    def load_symbol(self, symbol: str, asof: date, *, offline: bool = False) -> SymbolData:
-        """Never raises — failures are recorded on SymbolData.issues (fail-loud)."""
+    def load_symbol(
+        self, symbol: str, asof: date, *, offline: bool = False, news: bool = True
+    ) -> SymbolData:
+        """Never raises — failures are recorded on SymbolData.issues (fail-loud).
+
+        ``news=False`` loads OHLCV only — used by the universe screener's cheap scan
+        over hundreds of names, so it never fires hundreds of news-API calls (news is
+        hydrated only for the final candidate set).
+        """
         start = (asof - timedelta(days=self.settings.data.lookback_days)).isoformat()
         end = (asof + timedelta(days=1)).isoformat()
         sd = SymbolData(symbol=symbol)
@@ -136,7 +143,7 @@ class DataLoader:
         )
         # Opt-in news hydration (live only). Non-essential: a failure must never
         # fail the symbol's data gate — leave news=None and let the factor degrade.
-        if self.news_providers and sd.ok and not offline:
+        if news and self.news_providers and sd.ok and not offline:
             try:
                 from ..news.aggregate import fetch_news
 
@@ -147,9 +154,34 @@ class DataLoader:
         return sd
 
     def load_watchlist(
-        self, symbols: list[str], asof: date, *, offline: bool = False
+        self, symbols: list[str], asof: date, *, offline: bool = False, news: bool = True
     ) -> dict[str, SymbolData]:
-        return {sym: self.load_symbol(sym, asof, offline=offline) for sym in symbols}
+        """Load every symbol, concurrently when the universe is large.
+
+        ``load_symbol`` is I/O-bound (network/cache) and per-symbol independent (each
+        touches its own Parquet file), so a thread pool gives a near-linear speedup
+        that makes an S&P-500-sized universe fetchable in a daily job. Falls back to
+        a serial pass for tiny universes / ``max_workers == 1``. Results are returned
+        in the original symbol order regardless of completion order.
+        """
+        workers = min(self.settings.data.max_workers, max(1, len(symbols)))
+        if workers <= 1 or len(symbols) <= 1:
+            return {sym: self.load_symbol(sym, asof, offline=offline, news=news) for sym in symbols}
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        out: dict[str, SymbolData] = {sym: SymbolData(symbol=sym) for sym in symbols}
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {
+                ex.submit(self.load_symbol, sym, asof, offline=offline, news=news): sym
+                for sym in symbols
+            }
+            for fut, sym in futures.items():
+                try:
+                    out[sym] = fut.result()
+                except Exception as exc:  # noqa: BLE001 - load_symbol shouldn't raise; be safe
+                    out[sym].issues.append(f"{sym}: load failed ({exc})")
+        return out
 
     def load_market_context(self, asof: date, *, offline: bool = False) -> MarketContext:
         def _ohlcv(sym: str, start: str, end: str) -> pd.DataFrame:

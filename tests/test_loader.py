@@ -90,3 +90,30 @@ def test_load_watchlist_isolates_failures(loader):
     result = loader.load_watchlist(["AAA", "BBB"], ASOF)
     assert set(result) == {"AAA", "BBB"}
     assert all(sd.ok for sd in result.values())
+
+
+def test_load_watchlist_parallel_matches_serial(loader):
+    loader.providers = [_Fake("g", _clean_df())]
+    syms = [f"S{i}" for i in range(20)]
+    loader.settings.data.max_workers = 8
+    parallel = loader.load_watchlist(syms, ASOF)
+    loader.settings.data.max_workers = 1
+    serial = loader.load_watchlist(syms, ASOF)
+    assert list(parallel) == list(serial) == syms  # order preserved, not completion order
+    assert all(parallel[s].ok and serial[s].ok for s in syms)
+
+
+def test_load_watchlist_parallel_isolates_one_bad_symbol(loader):
+    class _Selective:
+        name = "sel"
+
+        def get_ohlcv(self, symbol, start, end):
+            if symbol == "BAD":
+                raise TransientDataError("boom")
+            return _clean_df()
+
+    loader.providers = [_Selective()]
+    loader.settings.data.max_workers = 4
+    res = loader.load_watchlist(["AAA", "BAD", "BBB"], ASOF)
+    assert res["AAA"].ok and res["BBB"].ok
+    assert not res["BAD"].ok

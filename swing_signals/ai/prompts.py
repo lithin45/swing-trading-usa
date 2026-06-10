@@ -12,10 +12,12 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-# Pinned per the claude-api skill (override here to trade cost/quality, e.g.
-# "claude-haiku-4-5" is ~5x cheaper and well-suited to this classification task).
-MODEL = "claude-opus-4-8"
-PROMPT_VERSION = "v1"
+# Sonnet balances cost and quality for this news-scoring/brief task (~3x cheaper
+# than Opus). Override to trade further: "claude-haiku-4-5" is ~5x cheaper still
+# and well-suited to this classification task. Bump PROMPT_VERSION on any change
+# (incl. the model) — it's part of the memo key, so it forces a clean re-score.
+MODEL = "claude-sonnet-4-6"
+PROMPT_VERSION = "v2"
 
 Catalyst = Literal[
     "earnings_beat", "earnings_miss", "guidance_up", "guidance_down", "mna",

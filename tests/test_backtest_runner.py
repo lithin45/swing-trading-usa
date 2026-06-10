@@ -131,7 +131,7 @@ def test_max_drawdown_is_non_positive():
 
 
 def test_all_exit_reasons_are_valid():
-    valid = {"stop", "target", "time_stop", "gap_stop", "end_of_range"}
+    valid = {"stop", "target", "time_stop", "time_stop_stagnant", "gap_stop", "end_of_range"}
     runner = _build_runner()
     result = runner.run(date(2022, 1, 1), date(2022, 12, 31))
     for trade in result.trades:

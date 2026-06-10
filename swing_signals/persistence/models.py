@@ -142,6 +142,12 @@ class Trade(Base):
     risk_per_share: Mapped[float | None] = mapped_column(default=None)  # actual_entry - stop = 1R
     suggested_risk_pct: Mapped[float | None] = mapped_column(default=None)  # live portfolio heat
 
+    # --- staged-exit partial scale-out (exits.mode=staged; null on legacy trades) ---
+    partial_done: Mapped[bool | None] = mapped_column(default=False)
+    partial_qty: Mapped[float | None] = mapped_column(default=None)  # shares sold at the 1st target
+    partial_fill_price: Mapped[float | None] = mapped_column(default=None)
+    partial_fill_date: Mapped[date | None] = mapped_column(default=None)
+
     # --- bracket child legs (native OCO; server-side stop+target) ---
     take_profit_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
     stop_loss_order_id: Mapped[str | None] = mapped_column(String(64), default=None)

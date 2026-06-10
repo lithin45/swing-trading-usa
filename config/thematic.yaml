@@ -1,0 +1,23 @@
+# Thematic universe — high-momentum theme leaders, curated by hand. Includes liquid
+# names that are NOT in the S&P 500 (quantum especially), which the index scan alone
+# would miss — exactly the news/momentum runners we want the momentum factor to catch.
+#
+# Each `theme` doubles as a COARSE SECTOR for the correlation cap, so loading up on,
+# say, five semis counts as one crowded bet (risk.max_per_sector). A symbol's theme
+# overrides its GICS sector for that cap. Curate this list periodically.
+#
+# NOTE: all still pass the liquidity floor + momentum eligibility before trading — a
+# name on this list is only ever a *candidate*, never an automatic trade.
+# Tickers are quoted: bare YAML reads some (e.g. ON, NO, Y) as booleans.
+themes:
+  semis:
+    ["NVDA", "AMD", "AVGO", "MRVL", "MU", "TSM", "ASML", "AMAT", "LRCX", "KLAC",
+     "ARM", "ON", "MCHP", "ADI", "TXN", "QCOM", "INTC", "NXPI", "MPWR", "SWKS", "TER"]
+  ai_software:
+    ["PLTR", "SNOW", "NOW", "CRM", "AI", "PATH", "DDOG", "MDB", "NET", "CRWD"]
+  ai_infra:
+    ["SMCI", "DELL", "ANET", "CRWV", "NBIS", "CLS", "COHR", "CIEN"]
+  data_center:
+    ["VRT", "DLR", "EQIX", "IRM", "ETN", "PWR", "GEV"]
+  quantum:
+    ["IONQ", "RGTI", "QBTS", "QUBT", "ARQQ"]

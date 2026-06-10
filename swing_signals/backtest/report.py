@@ -65,7 +65,7 @@ def format_backtest_report(
 
     lines.append("METRICS")
     lines.append("-" * 40)
-    lines.append(f"  Trades       {m['n_trades']}")
+    lines.append(f"  Trades       {m['n_trades']}  ({m.get('trades_per_month', 0)}/month)")
     lines.append(f"  Win rate     {_pct(m['win_rate'])}")
     lines.append(f"  Expectancy   {m['expectancy']:+.3f} R/trade")
     lines.append(f"  Avg win      {m['avg_win_r']:+.3f} R   avg loss  {m['avg_loss_r']:+.3f} R")

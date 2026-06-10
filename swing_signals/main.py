@@ -128,8 +128,16 @@ def run(
     for issue in market.issues:
         log.warning("market data issue: %s", issue)
 
-    symbols = settings.watchlist.symbols
+    # Universe: static list, or the dynamic screen (S&P 500 + themes + news movers).
+    from .universe.screen import resolve_universe
+    from .universe.thematic import sector_map
+
+    symbols = resolve_universe(settings, secrets, loader, today, offline=offline)
+    log.info("universe: %d symbol(s) (source=%s)", len(symbols), settings.watchlist.source)
     data = loader.load_watchlist(symbols, today, offline=offline)
+    smap = sector_map()
+    for sym, sd in data.items():
+        sd.sector = smap.get(sym)  # feeds the correlation cap
     passed = [s for s, sd in data.items() if sd.ok]
     skipped = {s: sd.issues for s, sd in data.items() if not sd.ok}
     log.info("watchlist data: %d/%d symbols passed quality gate", len(passed), len(symbols))

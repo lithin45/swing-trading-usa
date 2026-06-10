@@ -14,24 +14,28 @@ account:
   broker_min_order_usd: 1.0
 
 watchlist:
-  source: static           # static | universe_screen (screen added later)
-  # Starter set of liquid large-caps (placeholders — curate this).
+  source: universe_screen  # static | universe_screen (S&P 500 + themes + news movers)
+  # Fallback list used when source=static, or if the screen errors on a given day.
   # All should clear the liquidity floor under `universe` below.
   symbols: [AAPL, MSFT, NVDA, AMZN, GOOGL, META, AVGO, JPM, XOM, UNH]
 
-# Per-stock composite factors (research files 01, 02, 03, 05, 06).
-# Equal-weight default (file 10). Disable a factor with enabled:false or weight:0.
-# The engine normalizes by the sum of active weights, so they need not sum to 1.
+# Per-stock composite factors. Momentum/relative-strength is the core, research-
+# backed edge (the most-replicated anomaly in finance); technical confirms trend,
+# news adds catalyst context, setup adds low-weight breakout/pullback confirmation.
+# Disable a factor with enabled:false or weight:0. The engine normalizes by the sum
+# of ACTIVE+AVAILABLE weights (an unavailable factor — e.g. news with no key — is
+# excluded, not treated as neutral), so they need not sum to 1.
 factors:
-  technical:      {enabled: true, weight: 0.20}   # file 01
-  news_sentiment: {enabled: true, weight: 0.20}   # file 02
-  events:         {enabled: true, weight: 0.20}   # file 03
-  themes_cycles:  {enabled: true, weight: 0.20}   # file 05
-  smart_money:    {enabled: true, weight: 0.20}   # file 06
+  momentum:       {enabled: true, weight: 0.45}   # f08 — relative strength / 52w-high / 12-1 (core edge)
+  technical:      {enabled: true, weight: 0.25}   # f01 — trend/momentum confirmation
+  news_sentiment: {enabled: true, weight: 0.20}   # f02 — Claude-scored catalyst/sentiment
+  setup:          {enabled: true, weight: 0.10}   # f09 — breakout/pullback confirmation (added Phase 2)
+  # events (f03) / themes_cycles (f05) / smart_money (f06) remain unimplemented and
+  # are intentionally omitted (they would only ever be excluded as FACTORS_PENDING).
 
 scoring:
-  composite_min: 60.0      # minimum conviction (0-100) to emit a signal
-  agreement_min: 0.65      # confluence: fraction of weighted factors agreeing
+  composite_min: 70.0      # minimum conviction (0-100) to emit a signal (raised for selectivity)
+  agreement_min: 0.70      # confluence: fraction of weighted factors agreeing (raised)
   tier_high: 80.0          # conviction tiers → position-size multiplier
   tier_medium: 70.0
   tier_low: 60.0
@@ -49,6 +53,7 @@ regime:
   require_spy_above_ma: true        # no new longs if SPY below its 200-DMA
   vix_max: 28.0                     # veto/throttle above this VIX
   vix_backwardation_veto: true      # VIX/VIX3M > 1.0 → force one band lower
+  green_only_entries: true          # open new longs ONLY in a GREEN regime (high-conviction selectivity)
 
 # File 08 — hard risk & sizing constraints (all percentages of current equity).
 risk:
@@ -67,16 +72,41 @@ risk:
   drawdown_derisk: 0.10             # cut risk 50% when -10% from peak
   drawdown_hard_halt: 0.15          # full halt + review at -15%
 
+# Exit state machine (swing_signals/exits.py). mode=legacy reproduces the original
+# full-exit-at-target + hard 20-bar time-stop. mode=staged is the researched upgrade:
+# scale a partial out at the first target, ratchet to breakeven, ride a chandelier
+# trail with NO hard time cap, and time-cut only stagnant trades. Keep `legacy` until
+# the staged live-order plumbing is validated on paper, then flip to `staged`.
+exits:
+  mode: staged                      # legacy | staged  (staged = partial profit + let winners run)
+  partial_take_frac: 0.5            # fraction sold at the first (2R) target in staged mode
+  move_stop_to: breakeven           # breakeven | none — where the stop goes after the partial
+  stagnation_bars: 15               # cut a not-yet-working trade after this many bars
+  stagnation_min_r: 1.0             # "working" = up at least this many R
+  hard_backstop_bars: 60            # absolute max hold (never carry a position past this)
+
+# Volatility-scaled sizing (swing_signals/risk/vol_sizing.py). Shrinks size for high-
+# volatility names and in high-volatility markets — the one robustly evidenced risk
+# technique for momentum (~doubles risk-adjusted return). Only ever reduces size.
+sizing:
+  vol_scaling_enabled: true
+  vol_target_atr_pct: 2.5           # ~2.5%/day ATR earns full size; ~5%/day -> ~half size
+  vol_scalar_min: 0.4               # never below 40% of the base size
+  vol_scalar_max: 1.0               # never upsize beyond the base
+
 # Liquidity floor (files 01/08/09) — keeps spread/slippage from eating the edge.
 universe:
   min_price: 5.0
   min_dollar_volume: 10_000_000     # $10M average daily dollar volume
+  top_n_scan: 30                    # universe_screen: cheap-scan survivors handed to full scoring
+  max_llm_candidates: 30            # hard cap on names that reach the (costly) Claude news factor
 
 data:
   provider_order: [alpaca, yfinance, stooq] # first that succeeds wins; alpaca/stooq need keys
   cache_dir: .cache
   lookback_days: 400                # enough for 200-DMA + ATR warmup
   max_staleness_days: 4             # data older than this → skip the stock (fail-loud)
+  max_workers: 8                    # parallel symbol fetches (S&P-500-sized universe scaling)
   index_symbols: [SPY, QQQ, IWM]    # market-context indices (regime/breadth)
   fred_series:                      # macro/vol series pulled from FRED (file 04/07)
     vix: VIXCLS

@@ -5,16 +5,42 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session
 
 from .models import Base
+
+# Columns added to `trades` after the table first shipped. create_all() makes a fresh
+# table with every column but does NOT alter an existing one, so for a DB created before
+# these existed we ADD COLUMN the missing ones (idempotent, additive + nullable — safe on
+# the live Postgres and on SQLite). Types are spelled in dialect-portable SQL.
+_TRADE_ADDED_COLUMNS = {
+    "partial_done": "BOOLEAN",
+    "partial_qty": "FLOAT",
+    "partial_fill_price": "FLOAT",
+    "partial_fill_date": "DATE",
+}
+
+
+def _ensure_columns(engine: Engine) -> None:
+    """Add any post-hoc `trades` columns missing from an existing table (a tiny migration)."""
+    insp = inspect(engine)
+    if "trades" not in insp.get_table_names():
+        return  # create_all already made it fresh with every column
+    existing = {c["name"] for c in insp.get_columns("trades")}
+    missing = {c: t for c, t in _TRADE_ADDED_COLUMNS.items() if c not in existing}
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for col, sql_type in missing.items():
+            conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} {sql_type}"))
 
 
 def make_engine(url: str = "sqlite:///signals.db", *, echo: bool = False) -> Engine:
     """Create the engine and ensure the schema exists (``create_all`` is idempotent)."""
     engine = create_engine(url, echo=echo)
     Base.metadata.create_all(engine)
+    _ensure_columns(engine)
     return engine
 
 

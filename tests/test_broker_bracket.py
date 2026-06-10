@@ -125,6 +125,7 @@ def _settings(tmp_path, **broker):
     s = load_settings()  # equity 200000, entry_class auto, size_from_live_equity True (defaults)
     s.run.db_url = f"sqlite:///{tmp_path}/bracket.db"
     s.broker.enabled = True
+    s.exits.mode = "legacy"  # brackets are the legacy path (staged uses simple entries)
     for k, v in broker.items():
         setattr(s.broker, k, v)
     return s

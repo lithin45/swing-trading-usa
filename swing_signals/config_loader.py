@@ -36,6 +36,8 @@ ALLOWED_FACTORS = {
     "events",
     "themes_cycles",
     "smart_money",
+    "momentum",  # f08 — momentum / relative strength (the core edge; research-backed)
+    "setup",     # f09 — breakout/pullback pattern confirmation (low weight)
 }
 
 
@@ -106,6 +108,7 @@ class RegimeCfg(StrictModel):
     require_spy_above_ma: bool = True
     vix_max: float = Field(gt=0)
     vix_backwardation_veto: bool = True
+    green_only_entries: bool = False  # if True, open new longs ONLY in a GREEN regime (selectivity)
 
 
 class RiskCfg(StrictModel):
@@ -128,6 +131,8 @@ class RiskCfg(StrictModel):
 class UniverseCfg(StrictModel):
     min_price: float = Field(ge=0)
     min_dollar_volume: float = Field(ge=0)
+    top_n_scan: int = Field(default=30, ge=1)          # cheap-scan survivors handed to scoring
+    max_llm_candidates: int = Field(default=30, ge=1)  # cap on names reaching the Claude factor
 
 
 class DataCfg(StrictModel):
@@ -137,6 +142,7 @@ class DataCfg(StrictModel):
     max_staleness_days: int = Field(ge=0)
     index_symbols: list[str] = Field(default_factory=lambda: ["SPY", "QQQ", "IWM"])
     fred_series: dict[str, str] = Field(default_factory=dict)
+    max_workers: int = Field(default=8, ge=1)  # parallel symbol fetches (broad-universe scaling)
 
 
 class AlertsCfg(StrictModel):
@@ -179,6 +185,38 @@ class BrokerCfg(StrictModel):
     min_order_usd: float = Field(default=1.0, ge=1.0)  # Alpaca fractional minimum
 
 
+class ExitsCfg(StrictModel):
+    """Exit state machine (research file 11 + the momentum exit research).
+
+    ``mode: legacy`` (default) reproduces the original full-exit-at-target + hard
+    time-stop behaviour, so the system is unchanged until ``staged`` is validated.
+    ``staged`` scales a partial out at the first target, ratchets to breakeven,
+    rides a chandelier trail with no hard time cap, and time-cuts only stagnant
+    (not-yet-working) trades — with a loose backstop so nothing is held forever.
+    """
+
+    mode: Literal["legacy", "staged"] = "legacy"
+    partial_take_frac: float = Field(default=0.5, ge=0, le=1)  # sold at the first target
+    move_stop_to: Literal["breakeven", "none"] = "breakeven"
+    stagnation_bars: int = Field(default=15, ge=1)            # cut a non-working trade after N bars
+    stagnation_min_r: float = Field(default=1.0)              # "working" threshold (R)
+    hard_backstop_bars: int = Field(default=60, ge=1)         # absolute max hold
+
+
+class SizingCfg(StrictModel):
+    """Volatility-scaled position sizing (Daniel-Moskowitz; Barroso-Santa-Clara).
+
+    Scales size DOWN for more volatile names (high ATR%) and in more volatile
+    markets. It only ever *reduces* size (caps at 1.0), so it is risk-reducing by
+    construction — the one robustly evidenced risk technique for momentum.
+    """
+
+    vol_scaling_enabled: bool = True
+    vol_target_atr_pct: float = Field(default=2.5, gt=0)   # daily ATR% that earns full size
+    vol_scalar_min: float = Field(default=0.4, gt=0, le=1)  # floor (never below 40% size)
+    vol_scalar_max: float = Field(default=1.0, gt=0, le=1)  # ceiling (never upsize)
+
+
 class Settings(StrictModel):
     """Top-level validated configuration."""
 
@@ -193,6 +231,10 @@ class Settings(StrictModel):
     data: DataCfg
     alerts: AlertsCfg
     run: RunCfg
+    # Exit machine — defaulted (legacy) so configs without an `exits:` block are unchanged.
+    exits: ExitsCfg = Field(default_factory=ExitsCfg)
+    # Volatility-scaled sizing — defaulted so configs without a `sizing:` block still load.
+    sizing: SizingCfg = Field(default_factory=SizingCfg)
     # Broker config is optional — old configs without a `broker:` section still load, and
     # `broker is None or not broker.enabled` means signal-only (the current behavior).
     broker: BrokerCfg | None = None
