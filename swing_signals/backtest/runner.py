@@ -26,6 +26,7 @@ from ..factors import register_builtins
 from ..factors.f01_technical import build_panel
 from ..market.f04_macro import MacroModule
 from ..market.f07_regime import RegimeModule
+from ..scoring.budget import BudgetState
 from ..scoring.engine import generate_signals
 from .config import BacktestCfg
 from .costs import CostModel
@@ -94,6 +95,7 @@ class BacktestResult:
     n_no_trades: int = 0
     n_unfilled: int = 0         # signals whose entry never filled (limit aged out)
     n_capped: int = 0           # signals skipped by max-positions / heat / cash caps
+    n_budget_deferred: int = 0  # signals deferred by the monthly entry budget
 
 
 class BacktestRunner:
@@ -192,8 +194,16 @@ class BacktestRunner:
         n_no_trades = 0
         n_unfilled = 0
         n_capped = 0
+        n_budget_deferred = 0
         risk_cfg = self.settings.risk
         entry_type, max_pending, mkt_fallback = self._entry_model()
+        # Budget mirror (mandate §4): the same monthly ceiling + cooldown the live
+        # engine enforces, fed from simulated state — so the reported cadence is an
+        # honest preview of live behavior, not an unconstrained upper bound. A charge
+        # is one ENTRY SUBMISSION (mirrors live trades rows); held re-prints are free.
+        budget_cfg = self.settings.budget
+        charged_by_month: dict[str, int] = {}       # "YYYY-MM" -> entry submissions
+        last_stop: dict[str, date] = {}             # ticker -> last stop-out date
 
         for signal_bar in all_bars[:-1]:  # the last bar only serves earlier fills
             trading_days.append(signal_bar)
@@ -204,6 +214,8 @@ class BacktestRunner:
             for trade in closed:
                 trades.append(trade)
                 del positions[trade.ticker]
+                if trade.exit_reason in ("stop", "gap_stop"):
+                    last_stop[trade.ticker] = signal_bar  # feeds the cooldown
 
             # 2. Work resting entry orders against TODAY's bar (they were created on
             #    an earlier signal bar — live submits post-close, works next session).
@@ -224,11 +236,29 @@ class BacktestRunner:
             )
             regime = RegimeModule().compute(ctx)
             macro = MacroModule().compute(ctx)
+            mkey = f"{signal_bar:%Y-%m}"
+            budget_state = None
+            if budget_cfg.enabled:
+                blocked = frozenset(
+                    sym for sym, d in last_stop.items()
+                    if (signal_bar - d).days <= budget_cfg.cooldown_days
+                ) if budget_cfg.cooldown_days > 0 else frozenset()
+                budget_state = BudgetState(
+                    enabled=True,
+                    max_entries_per_month=budget_cfg.max_entries_per_month,
+                    charges_used=charged_by_month.get(mkey, 0),
+                    held_symbols=frozenset(positions) | frozenset(pending),
+                    cooldown_blocked=blocked,
+                )
             result = generate_signals(
-                symbol_data, ctx, regime, macro_multiplier=macro.multiplier
+                symbol_data, ctx, regime, macro_multiplier=macro.multiplier,
+                budget=budget_state,
             )
             n_signals += len(result.actionable)
             n_no_trades += len(result.no_trades)
+            n_budget_deferred += sum(
+                1 for s in result.no_trades if "BUDGET_EXHAUSTED" in s.flags
+            )
 
             # 4. Submit new entries under the LIVE portfolio constraints. Pending
             #    orders count toward the caps exactly as live active_trades do.
@@ -256,6 +286,8 @@ class BacktestRunner:
                     shares=shares, risk_frac=risk_frac,
                     is_market=(entry_type == "market"),
                 )
+                # One submission = one budget charge (mirrors a live `trades` row).
+                charged_by_month[mkey] = charged_by_month.get(mkey, 0) + 1
 
             # 5. Equity = cash + value of what is actually held at this close.
             equity = cash + self._open_value(positions, signal_bar)
@@ -287,7 +319,11 @@ class BacktestRunner:
                 equity_curve[-1] = cash + self._open_value(positions, last_bar)
 
         n_days = len(trading_days)
-        metrics = compute_metrics(trades, equity_curve or [equity_start], equity_start, n_days)
+        metrics = compute_metrics(
+            trades, equity_curve or [equity_start], equity_start, n_days,
+            entries_by_month=charged_by_month,
+            budget_cap=budget_cfg.max_entries_per_month if budget_cfg.enabled else None,
+        )
         return BacktestResult(
             trades=trades,
             equity_curve=equity_curve or [equity],
@@ -298,6 +334,7 @@ class BacktestRunner:
             n_no_trades=n_no_trades,
             n_unfilled=n_unfilled,
             n_capped=n_capped,
+            n_budget_deferred=n_budget_deferred,
         )
 
     def _entry_model(self) -> tuple[str, int, bool]:

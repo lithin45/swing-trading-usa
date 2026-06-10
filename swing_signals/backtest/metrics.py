@@ -71,12 +71,17 @@ def compute_metrics(
     equity_curve: list[float],      # daily equity, starting at equity_start
     equity_start: float,
     n_trading_days: int,
+    *,
+    entries_by_month: dict[str, int] | None = None,  # "YYYY-MM" -> NEW entries charged
+    budget_cap: int | None = None,                   # the monthly ceiling (None = off)
 ) -> dict[str, Any]:
     """Return the full file-11 metric suite from a trade log + equity curve."""
 
     n = len(trades)
     if n == 0:
-        return _empty_metrics(equity_start)
+        out = _empty_metrics(equity_start)
+        out["cadence"] = _cadence(trades, entries_by_month, budget_cap)
+        return out
 
     rs = [t.realized_r for t in trades]
     winners = [r for r in rs if r > 0]
@@ -128,6 +133,9 @@ def compute_metrics(
     return {
         "n_trades": n,
         "trades_per_month": round(trades_per_month, 2),
+        # Cadence DISTRIBUTION (mandate §7): a flat average hides the hot month that
+        # breaches the ceiling; the per-month histogram is the honest view.
+        "cadence": _cadence(trades, entries_by_month, budget_cap),
         "win_rate": round(win_rate, 4),
         "expectancy": round(expectancy, 4),
         "avg_win_r": round(avg_win_r, 4),
@@ -153,6 +161,35 @@ def compute_metrics(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _cadence(
+    trades: list[Trade],
+    entries_by_month: dict[str, int] | None,
+    budget_cap: int | None,
+) -> dict[str, Any]:
+    """Per-month entry/fill distribution + ceiling compliance.
+
+    ``entries_by_month`` (from the runner's budget mirror) counts NEW names charged
+    against each month's budget — the mandate's number. ``fills_by_month`` counts
+    positions actually opened (entry_date), a sanity cross-check.
+    """
+    fills: dict[str, int] = {}
+    for t in trades:
+        key = f"{t.entry_date:%Y-%m}"
+        fills[key] = fills.get(key, 0) + 1
+    entries = dict(sorted((entries_by_month or {}).items()))
+    counts = list(entries.values())
+    return {
+        "entries_by_month": entries,
+        "fills_by_month": dict(sorted(fills.items())),
+        "entries_per_month_max": max(counts) if counts else 0,
+        "entries_per_month_mean": round(sum(counts) / len(counts), 2) if counts else 0.0,
+        "budget_cap": budget_cap,
+        "months_over_cap": (
+            sum(1 for c in counts if c > budget_cap) if budget_cap is not None else None
+        ),
+    }
+
 
 def _max_drawdown(equity: list[float]) -> float:
     """Maximum peak-to-trough decline as a fraction (negative number)."""

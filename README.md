@@ -37,6 +37,19 @@ conviction score; **04 macro** scales position size; **07 regime** can hard-veto
 **08 risk** sizes every trade and can veto or shrink it. A high score can never buy its way past a
 risk-off market or a blown risk limit.
 
+**Trade budget (prime directive):** a hard ceiling of `budget.max_entries_per_month` (default 7)
+NEW entries per calendar month, enforced in the engine (so alerts, the paper broker, and the
+backtest all respect it), with a per-name post-stop cooldown (`budget.cooldown_days`). Each new
+position submission charges a slot; re-prints of a still-held name ride free; a re-entry after a
+close charges again. Deferred setups are flagged `BUDGET_EXHAUSTED` and persisted to the
+`rejections` table; the backtest report prints the per-month entry-cadence histogram so the
+ceiling is *proven*, not assumed (2018 replay: max 7/month, 0 months over cap).
+
+**Earnings guard:** with a Finnhub key, the engine vetoes new entries within
+`earnings.veto_days_before` days of a confirmed print (`EARNINGS_SOON`), and `manage` exits open
+positions before one (`earnings_exit`) — a 3-ATR stop cannot contain an earnings gap. Without a
+key the run proceeds unscreened and warns loudly.
+
 **Principles:** modular and config-driven (add/remove a factor or change a weight in
 `config/settings.yaml`, never in code); transparent (every signal records which factors fired and
 why); fail safe and loud (missing/stale data → skip the stock and say so, never emit a confident

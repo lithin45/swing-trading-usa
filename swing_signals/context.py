@@ -29,6 +29,9 @@ class SymbolData:
     insider: list[dict[str, Any]] | None = None
     short_interest: dict[str, Any] | None = None
     sector: str | None = None
+    # Next confirmed earnings date (live: from the calendar provider; backtest: None —
+    # no free point-in-time earnings history). Feeds the engine's EARNINGS_SOON veto.
+    next_earnings: date | None = None
     # Precomputed indicator row at the as-of bar — the backtest fast-path sets this
     # so factors read O(1) scalars instead of recomputing indicators every bar.
     indicators: dict[str, Any] | None = None

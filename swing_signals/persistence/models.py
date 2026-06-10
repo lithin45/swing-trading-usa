@@ -77,6 +77,32 @@ class Signal(Base):
     )
 
 
+class Rejection(Base):
+    """One rejected/deferred setup for one day — the audit trail the mandate requires.
+
+    Every ``EngineResult.no_trades`` entry lands here (regime veto, ineligible,
+    extension, below-threshold, budget-exhausted, cooldown, …), so near-misses and
+    budget pressure are queryable after the fact instead of living only in the
+    printed report. Same ``(signal_date, symbol)`` idempotency as ``signals``.
+    """
+
+    __tablename__ = "rejections"
+    __table_args__ = (UniqueConstraint("signal_date", "symbol", name="uq_rejection_day_symbol"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("runs.id"), default=None)
+    signal_date: Mapped[date]
+    symbol: Mapped[str] = mapped_column(String(16))
+    composite_score: Mapped[float | None] = mapped_column(default=None)
+    conviction_tier: Mapped[str | None] = mapped_column(default=None)
+    agreement_score: Mapped[float | None] = mapped_column(default=None)
+    regime_state: Mapped[str | None] = mapped_column(default=None)
+    flags: Mapped[str | None] = mapped_column(default=None)        # JSON: list of flags
+    reasons: Mapped[str | None] = mapped_column(Text, default=None)  # JSON: list of reasons
+    explanation: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime]
+
+
 class Outcome(Base):
     """One signal's realized outcome, updated as the trade resolves (file 12 §6)."""
 

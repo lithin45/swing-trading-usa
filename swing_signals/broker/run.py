@@ -23,6 +23,27 @@ def _broker_enabled(settings: Settings) -> bool:
     return settings.broker is not None and settings.broker.enabled
 
 
+def _db_preflight(settings: Settings, secrets: Secrets) -> bool:
+    """Fail loudly BEFORE touching the broker if the system-of-record is unreachable.
+
+    Neon is the single source of open-trade truth (audit P1 #9): submitting or
+    managing orders against an unreachable store risks duplicate/blind actions.
+    """
+    try:
+        from sqlalchemy import text
+
+        from ..config_loader import resolve_db_url
+        from ..persistence.db import make_engine
+
+        with make_engine(resolve_db_url(settings, secrets)).connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as exc:  # noqa: BLE001 - any failure here means do not trade
+        log.error("DB preflight failed — refusing to touch the broker without the "
+                  "system of record: %s", exc)
+        return False
+
+
 def run_trade(
     settings: Settings,
     secrets: Secrets,
@@ -43,6 +64,8 @@ def run_trade(
     if not is_trading_day(today):
         log.info("%s is not an NYSE trading day; skipping trade", today)
         return 0
+    if not _db_preflight(settings, secrets):
+        return 1
     try:
         report = submit_entries(settings, secrets, today=today, dry_run=dry_run)
         log.info("trade%s: %s", " [dry-run]" if dry_run else "", report.summary())
@@ -72,6 +95,8 @@ def run_manage(
     if not is_trading_day(today):
         log.info("%s is not an NYSE trading day; skipping manage", today)
         return 0
+    if not _db_preflight(settings, secrets):
+        return 1
     try:
         report = reconcile_and_manage(
             settings, secrets, today=today, dry_run=dry_run, offline=offline

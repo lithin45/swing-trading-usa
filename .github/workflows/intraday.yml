@@ -14,6 +14,12 @@ on:
     - cron: "0,30 13-21 * * 1-5"
   workflow_dispatch: {}
 
+# Two overlapping manage passes can briefly duplicate protective stops (audit P1 #7);
+# one at a time, and a queued run supersedes a stale waiting one.
+concurrency:
+  group: swing-manage
+  cancel-in-progress: false
+
 jobs:
   manage:
     runs-on: ubuntu-latest
@@ -31,6 +37,7 @@ jobs:
         env:
           SWING_ALPACA_API_KEY: ${{ secrets.SWING_ALPACA_API_KEY }}
           SWING_ALPACA_SECRET_KEY: ${{ secrets.SWING_ALPACA_SECRET_KEY }}
+          SWING_FINNHUB_API_KEY: ${{ secrets.SWING_FINNHUB_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_INTRADAY_URL }}
         run: swing-signals manage

@@ -23,6 +23,7 @@ from .models import (
     NewsItem,
     NewsScore,
     Outcome,
+    Rejection,
     Run,
     Signal,
     Trade,
@@ -105,6 +106,102 @@ def save_signals(
     return inserted
 
 
+def save_rejections(
+    session: Session, run: Run | None, rejections: list[EngineSignal], *, created_at: datetime
+) -> int:
+    """Persist the day's rejected/deferred setups (idempotent on ``(signal_date, symbol)``).
+
+    This is the budget/near-miss audit trail: without it, a 69.8-vs-70.0 near miss or
+    a BUDGET_EXHAUSTED deferral exists only in the printed report and is gone by morning.
+    """
+    inserted = 0
+    for sig in rejections:
+        existing = session.scalar(
+            select(Rejection).where(
+                Rejection.signal_date == sig.signal_date, Rejection.symbol == sig.ticker
+            )
+        )
+        if existing is not None:
+            continue
+        session.add(Rejection(
+            run_id=run.id if run is not None else None,
+            signal_date=sig.signal_date,
+            symbol=sig.ticker,
+            composite_score=sig.conviction_score,
+            conviction_tier=sig.conviction_tier,
+            agreement_score=sig.agreement_score,
+            regime_state=sig.regime_state,
+            flags=json.dumps(sig.flags) if sig.flags else None,
+            reasons=json.dumps(sig.reasons) if sig.reasons else None,
+            explanation=sig.explanation or None,
+            created_at=created_at,
+        ))
+        inserted += 1
+    return inserted
+
+
+def month_entry_charges(session: Session, *, month_of: date) -> int:
+    """Entry submissions this calendar month = ``trades`` rows with a signal_date in it.
+
+    Each row is one real entry decision (unique per ``(signal_date, symbol)``; a
+    re-entry of a closed name on a later day is a new row — a new charge; a held
+    name's re-emission creates no row — no charge). Canceled rows still count:
+    the slot was spent when the order was submitted.
+    """
+    from sqlalchemy import func
+
+    start = month_of.replace(day=1)
+    return int(session.scalar(
+        select(func.count()).select_from(Trade).where(Trade.signal_date >= start)
+    ) or 0)
+
+
+def month_emitted_symbols(session: Session, *, month_of: date, before_day: date) -> set[str]:
+    """Distinct symbols emitted as BUY signals in ``month_of``'s calendar month with
+    signal_date < before_day — the signal-only fallback for budget charges.
+
+    Distinct symbols, because the screen re-emits a still-strong name daily; in
+    signal-only mode there are no trade rows to count exactly, so a same-month
+    re-entry after a stop is undercounted (documented approximation). The strict
+    ``< before_day`` keeps a same-day re-run idempotent: today's own
+    (already-persisted) signals never shrink today's remaining budget.
+    """
+    start = month_of.replace(day=1)
+    return set(session.scalars(
+        select(Signal.symbol).distinct().where(
+            Signal.signal_date >= start,
+            Signal.signal_date < before_day,
+            Signal.direction == "long",
+        )
+    ))
+
+
+def recent_stop_symbols(session: Session, *, since: date) -> set[str]:
+    """Symbols stopped out on/after ``since`` — the per-name cooldown set.
+
+    Reads both worlds: real paper trades (``trades.exit_reason='stopped'``) and the
+    signal tracker's theoretical outcomes (``outcomes.status='stopped'``), so the
+    cooldown protects signal-only operation exactly like broker operation.
+    """
+    stopped: set[str] = set()
+    for sym in session.scalars(
+        select(Trade.symbol).where(
+            Trade.status == "closed",
+            Trade.exit_reason == "stopped",
+            Trade.exit_date >= since,
+        )
+    ):
+        stopped.add(sym)
+    for sym in session.scalars(
+        select(Signal.symbol).join(Outcome, Outcome.signal_id == Signal.id).where(
+            Outcome.status == "stopped",
+            Outcome.exit_date >= since,
+        )
+    ):
+        stopped.add(sym)
+    return stopped
+
+
 def open_signals(session: Session) -> list[Signal]:
     """Signals with no outcome yet, or an outcome still 'open' — for the tracker job."""
     return list(session.scalars(
@@ -138,8 +235,10 @@ def persist_daily_run(
     status: str = "success",
     error: str | None = None,
     secrets: Secrets | None = None,
+    no_trades: list[EngineSignal] | None = None,
 ) -> int:
-    """Open the configured DB, write a run row + its signals, return signals inserted.
+    """Open the configured DB, write a run row + its signals (and the day's rejections),
+    return signals inserted.
 
     Passing ``secrets`` lets a local ``.env`` ``SWING_DATABASE_URL`` redirect to Postgres; tests
     that omit it stay on ``settings.run.db_url`` (their temp SQLite).
@@ -155,6 +254,8 @@ def persist_daily_run(
             data_provider=provider, git_sha=_git_sha(), config_hash=_config_hash(settings),
             error=error,
         )
+        if no_trades:
+            save_rejections(session, run, no_trades, created_at=run_ts)
         return save_signals(session, run, actionable, created_at=run_ts)
 
 
@@ -221,6 +322,12 @@ def active_trades(session: Session) -> list[Trade]:
     return list(
         session.scalars(select(Trade).where(Trade.status.notin_(["closed", "canceled"])))
     )
+
+
+def active_trade_symbols(session: Session) -> set[str]:
+    """Symbols with an in-flight trade — re-emissions of these never charge the budget
+    (a held name re-printing is not a NEW entry; the broker skips it as held anyway)."""
+    return {t.symbol for t in active_trades(session)}
 
 
 def open_trades(session: Session) -> list[Trade]:
