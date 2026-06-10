@@ -82,6 +82,10 @@ class ScoringCfg(StrictModel):
     tier_high: float = Field(ge=0, le=100)
     tier_medium: float = Field(ge=0, le=100)
     tier_low: float = Field(ge=0, le=100)
+    # Don't-chase gate: veto entries more than this many ATRs above the 20-EMA
+    # (0 = disabled). Momentum ranking favors the most extended names; this bounds
+    # buying blow-off tops that mean-revert before reaching the 2R target.
+    max_extension_atr: float = Field(default=0.0, ge=0)
 
     @model_validator(mode="after")
     def _tiers_ordered(self) -> ScoringCfg:

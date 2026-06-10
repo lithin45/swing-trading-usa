@@ -196,6 +196,7 @@ def run_backtest(
     offline: bool = False,
     universe: str = "watchlist",
     include_themes: bool = False,
+    dump_trades: str | None = None,
 ) -> int:
     """Run the Stage-5 backtest harness. Returns process exit code."""
     from datetime import date as _date
@@ -346,6 +347,19 @@ def run_backtest(
 
     report = format_backtest_report(result, folds=folds)
     print(report)
+    if dump_trades:
+        import csv as _csv
+        from dataclasses import asdict as _asdict
+        from dataclasses import fields as _fields
+
+        from .backtest.metrics import Trade as _Trade
+
+        with open(dump_trades, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=[f.name for f in _fields(_Trade)])
+            w.writeheader()
+            for t in result.trades:
+                w.writerow(_asdict(t))
+        log.info("trade ledger written to %s (%d trades)", dump_trades, len(result.trades))
     log.info(
         "backtest complete: %d trades | expectancy %.3f R | max DD %.1f%%",
         result.metrics["n_trades"],

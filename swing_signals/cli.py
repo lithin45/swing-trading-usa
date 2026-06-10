@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
                            "not validation.")
     bt_p.add_argument("--offline", action="store_true",
                       help="Use cached data only; never hit the network.")
+    bt_p.add_argument("--dump-trades", default=None, metavar="CSV_PATH",
+                      help="Write the full per-trade ledger to a CSV for analysis")
     bt_p.add_argument("--config", default=None, metavar="PATH")
 
     # ---- refresh-sp500 (operator command: rewrite the committed membership CSVs) ----
@@ -129,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             offline=args.offline,
             universe=args.universe,
             include_themes=args.include_themes,
+            dump_trades=args.dump_trades,
         )
 
     # The dead-man's switch must cover EVERY scheduled command, not just the signal

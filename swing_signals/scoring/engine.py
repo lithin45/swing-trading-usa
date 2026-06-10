@@ -219,6 +219,36 @@ def generate_signals(
             ))
             continue
 
+        # --- hard gate: extension (don't chase) — veto entries too many ATRs above
+        # the 20-EMA. Momentum ranking concentrates in the MOST extended names; the
+        # most extended are also the most mean-reversion-prone right after entry.
+        max_ext = settings.scoring.max_extension_atr
+        if max_ext > 0:
+            ind_row = sd.indicators or {}
+            ema20 = (
+                float(ind_row["ema20"]) if "ema20" in ind_row
+                else float(ind.ema(sd.ohlcv["close"], 20).iloc[-1])
+            )
+            atr_ext = (
+                float(ind_row["atr14"]) if "atr14" in ind_row
+                else float(ind.atr(
+                    sd.ohlcv["high"], sd.ohlcv["low"], sd.ohlcv["close"],
+                    settings.risk.atr_period,
+                ).iloc[-1])
+            )
+            if atr_ext > 0 and (price - ema20) / atr_ext > max_ext:
+                no_trades.append(Signal(
+                    ticker=ticker, signal_date=sig_date, direction="NO-TRADE",
+                    conviction_score=round(score, 1), conviction_tier="None",
+                    regime_state=regime.state, factor_contributions=attribution,
+                    agreement_score=round(agreement, 2),
+                    flags=flags + ["EXTENSION"], reasons=reasons,
+                    explanation=(f"{ticker}: no-trade — extended "
+                                 f"{(price - ema20) / atr_ext:.1f} ATR above EMA20 "
+                                 f"(cap {max_ext:.1f})"),
+                ))
+                continue
+
         tier = _tier_of(score, settings.scoring)
 
         # --- soft gates: conviction + agreement thresholds ---

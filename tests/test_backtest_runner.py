@@ -147,6 +147,7 @@ def _mini_runner(ohlcv_all, *, equity=100_000.0, max_positions=8, heat_cap=0.10,
     settings.risk.portfolio_heat_cap = heat_cap
     settings.broker.entry_order_type = entry_type
     settings.broker.market_fallback = market_fallback
+    settings.scoring.max_extension_atr = 0.0  # these tests pin fill/cap mechanics, not the gate
     if exits_mode is not None:
         settings.exits.mode = exits_mode
     bt_cfg = BacktestCfg(
