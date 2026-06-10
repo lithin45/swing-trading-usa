@@ -96,10 +96,12 @@ def submit_entries(
 
     from ..persistence import repository as repo
     from ..persistence.db import make_engine, session_scope
+    from ..universe.thematic import sector_map
 
     account = broker.get_account()
     held = {p.symbol for p in broker.list_positions()}
     open_buys = {o.symbol for o in broker.list_open_orders() if o.side == "buy"}
+    sector_of = sector_map()  # symbol -> sector/theme for the correlation cap
     now = datetime.now()
 
     with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
@@ -107,7 +109,7 @@ def submit_entries(
         active = repo.active_trades(session)
         gate = evaluate_gates(
             settings, account=account, open_trades=active,
-            snapshots=repo.list_snapshots(session), today=today,
+            snapshots=repo.list_snapshots(session), today=today, sector_of=sector_of,
         )
         if gate.halted:
             report.halted, report.halt_reason = True, gate.halt_reason
@@ -125,7 +127,7 @@ def submit_entries(
                 continue
 
             risk_pct = (sig.suggested_risk_pct or 0.0) * gate.derisk_multiplier
-            ok, why = can_open(gate, settings, risk_pct=risk_pct)
+            ok, why = can_open(gate, settings, risk_pct=risk_pct, sector=sector_of.get(sym))
             if not ok:
                 report.skipped_gated.append((sym, why or "gated"))
                 continue
@@ -147,8 +149,11 @@ def submit_entries(
 
             # Native bracket (server-side stop+target OCO) when the position is whole-share;
             # otherwise a simple limit + self-managed exits (the only path for fractional).
+            # Staged exits scale a partial out, which Alpaca brackets can't do, so staged
+            # mode always uses simple entries and lets `manage` own the exits.
             use_bracket = (
-                bro.entry_class in ("auto", "bracket")
+                settings.exits.mode != "staged"
+                and bro.entry_class in ("auto", "bracket")
                 and sig.target_price is not None
                 and (bro.entry_class == "bracket" or desired >= 1.0)
             )
@@ -213,5 +218,8 @@ def submit_entries(
             report.submitted.append(sym)
             gate.open_positions += 1  # apply caps within this batch too
             gate.open_heat_pct += risk_pct
+            sec = sector_of.get(sym)
+            if sec:
+                gate.sector_counts[sec] = gate.sector_counts.get(sec, 0) + 1
 
     return report

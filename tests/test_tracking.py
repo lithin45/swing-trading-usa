@@ -108,6 +108,7 @@ def _engine_sig(symbol: str) -> EngineSignal:
 
 def test_run_tracker_updates_open_signal(tmp_path):
     settings = load_settings()
+    settings.exits.mode = "legacy"  # asserts the legacy full-target-exit outcome
     settings.run.db_url = f"sqlite:///{tmp_path}/t.db"
     eng = make_engine(settings.run.db_url)
     with session_scope(eng) as s:

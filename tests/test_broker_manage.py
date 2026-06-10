@@ -112,6 +112,7 @@ def _settings(tmp_path, **broker):
     s = load_settings()
     s.run.db_url = f"sqlite:///{tmp_path}/manage.db"
     s.broker.enabled = True
+    s.exits.mode = "legacy"  # default to legacy here; the staged tests opt in via _staged()
     for k, v in broker.items():
         setattr(s.broker, k, v)
     return s
@@ -259,3 +260,94 @@ def test_dry_run_changes_nothing(tmp_path, monkeypatch):
                          loader=FakeLoader(None), dry_run=True)
     assert _read(s.run.db_url)["status"] == "pending_entry"  # unchanged
     assert _snapshots(s.run.db_url) == []                    # no snapshot
+
+
+# --- staged-mode exits (exits.mode=staged) ------------------------------------
+
+def _staged(tmp_path, **broker):
+    s = _settings(tmp_path, **broker)
+    s.exits.mode = "staged"
+    return s
+
+
+def test_staged_partial_scale_out_and_breakeven(tmp_path, monkeypatch):
+    s = _staged(tmp_path)
+    _seed(s.run.db_url, status="open", order_class="simple", qty=2.0, stop_price=94.0,
+          effective_stop=94.0, target_price=112.0, entry_fill_date=DAY, actual_entry=100.0,
+          risk_per_share=6.0)
+    broker = FakeBroker(positions=[BrokerPosition("AAPL", 2.0, 100.0, 226.0, 26.0, 113.0)])
+    df = _ohlcv(last_low=108.0, last_high=113.0, close=113.0)  # high 113 >= target 112 -> partial
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(df))
+    t = _read(s.run.db_url)
+    assert t["partial_done"] is True
+    assert t["partial_qty"] == 1.0            # 50% of 2 shares
+    assert t["partial_fill_price"] == 112.0
+    assert t["effective_stop"] == 100.0       # ratcheted to breakeven (entry)
+    assert t["status"] == "open"              # remainder still open
+    assert ("AAPL", "target_partial") in rep.exits_submitted
+    assert any(o.side == "sell" and o.type == "market" for o in broker.submitted)
+    assert any(o.type == "stop" and o.qty == 1.0 for o in broker.submitted)  # remainder protected
+
+
+def test_staged_stagnant_trade_is_time_cut(tmp_path, monkeypatch):
+    s = _staged(tmp_path)
+    s.exits.stagnation_bars = 15
+    _seed(s.run.db_url, status="open", order_class="simple", qty=2.0, stop_price=94.0,
+          effective_stop=94.0, target_price=130.0, entry_fill_date=date(2024, 1, 2),
+          actual_entry=100.0, risk_per_share=6.0)
+    broker = FakeBroker(positions=[BrokerPosition("AAPL", 2.0, 100.0, 202.0, 2.0, 101.0)])
+    df = _ohlcv(last_low=99.0, last_high=102.0, close=101.0)  # ~+0.17R after ~35 bars -> stagnant
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(df))
+    assert ("AAPL", "time_stop_stagnant") in rep.exits_submitted
+    assert _read(s.run.db_url)["status"] == "closing"
+
+
+def test_staged_working_trade_is_not_time_cut(tmp_path, monkeypatch):
+    s = _staged(tmp_path)
+    s.exits.stagnation_bars = 15
+    _seed(s.run.db_url, status="open", order_class="simple", qty=2.0, stop_price=94.0,
+          effective_stop=94.0, target_price=130.0, entry_fill_date=date(2024, 1, 2),
+          actual_entry=100.0, risk_per_share=6.0)
+    broker = FakeBroker(positions=[BrokerPosition("AAPL", 2.0, 100.0, 216.0, 16.0, 108.0)])
+    df = _ohlcv(last_low=107.0, last_high=109.0, close=108.0)  # +1.33R -> working, rides
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(df))
+    assert rep.exits_submitted == []
+    assert _read(s.run.db_url)["status"] == "open"
+
+
+def test_staged_bracket_transitions_to_self_managed(tmp_path, monkeypatch):
+    s = _staged(tmp_path)
+    _seed(s.run.db_url, status="open", order_class="bracket", qty=2.0, stop_price=94.0,
+          effective_stop=94.0, target_price=130.0, entry_fill_date=DAY, actual_entry=100.0,
+          risk_per_share=6.0, take_profit_order_id="TP1", stop_loss_order_id="SL1")
+    broker = FakeBroker(
+        positions=[BrokerPosition("AAPL", 2.0, 100.0, 210.0, 10.0, 105.0)],
+        orders=[_order("TP1", "AAPL", "sell", "limit", "accepted"),
+                _order("SL1", "AAPL", "sell", "stop", "accepted")],
+    )
+    df = _ohlcv(last_low=104.0, last_high=106.0, close=105.0)  # no exit; just transition
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker, loader=FakeLoader(df))
+    t = _read(s.run.db_url)
+    assert t["order_class"] == "simple"
+    assert t["take_profit_order_id"] is None and t["stop_loss_order_id"] is None
+    assert broker._orders["TP1"].status == "canceled"
+    assert broker._orders["SL1"].status == "canceled"
+
+
+def test_staged_blended_realized_r_on_close(tmp_path, monkeypatch):
+    # Closing trade that had a +2R partial; remainder stops at breakeven -> blended +1R.
+    s = _staged(tmp_path)
+    _seed(s.run.db_url, status="closing", exit_order_id="X1", exit_reason="stopped",
+          order_class="simple", qty=2.0, filled_qty=2.0, actual_entry=100.0, risk_per_share=6.0,
+          entry_fill_date=date(2024, 2, 13), partial_done=True, partial_qty=1.0,
+          partial_fill_price=112.0)
+    broker = FakeBroker(orders=[_order("X1", "AAPL", "sell", "market", "filled", fill=100.0)])
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                         loader=FakeLoader(None))
+    t = _read(s.run.db_url)
+    assert t["status"] == "closed"
+    assert t["realized_r"] == 1.0    # avg exit (112+100)/2 = 106 -> (106-100)/6
+    assert t["pnl"] == 12.0          # 1*(112-100) + 1*(100-100)

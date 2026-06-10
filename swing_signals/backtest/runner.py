@@ -19,6 +19,8 @@ import pandas as pd
 
 from ..config_loader import Secrets, Settings
 from ..context import MarketContext, RunContext, SymbolData
+from ..exits import build_rules, decide_exit
+from ..factors import indicators as ind
 from ..factors import register_builtins
 from ..factors.f01_technical import build_panel
 from ..market.f04_macro import MacroModule
@@ -50,6 +52,10 @@ class _OpenPosition:
     risk_per_share: float
     shares: float
     bars_open: int = 0
+    effective_stop: float = 0.0   # trailed stop (staged); starts at the initial stop
+    partial_done: bool = False    # scaled a partial out at the first target?
+    partial_frac: float = 0.0     # fraction sold in the scale-out
+    partial_fill: float = 0.0     # cost-adjusted fill price of the scale-out
 
 
 @dataclass
@@ -95,6 +101,10 @@ class BacktestRunner:
         self.secrets = secrets
         self.costs = CostModel(per_side_bps=bt_cfg.cost_bps)
         self._panels: dict[str, pd.DataFrame] = {}  # per-symbol precomputed indicator panel
+        # Exit rules (legacy/staged) + a per-symbol chandelier trail series (staged only).
+        self.rules = build_rules(settings, bt_cfg.max_hold_bars)
+        self._staged = getattr(getattr(settings, "exits", None), "mode", "legacy") == "staged"
+        self._chand: dict[str, pd.Series] = {}
         register_builtins()
 
     # ------------------------------------------------------------------
@@ -190,6 +200,7 @@ class BacktestRunner:
                     target=sig.target_price or 0.0,
                     risk_per_share=rps,
                     shares=shares,
+                    effective_stop=sig.stop_price or 0.0,
                 )
 
             # 5. Mark-to-market open positions and update equity.
@@ -299,7 +310,7 @@ class BacktestRunner:
     def _check_exits(
         self, positions: dict[str, _OpenPosition], bar: date
     ) -> list[Trade]:
-        """Check stop, target, and time-stop for every open position."""
+        """Trail, scale, and exit every open position via the shared exit machine."""
         closed: list[Trade] = []
         for ticker, pos in list(positions.items()):
             ohlcv = self.ohlcv_all.get(ticker)
@@ -309,31 +320,64 @@ class BacktestRunner:
             if row is None:
                 continue
 
-            open_ = float(row["open"])
-            low = float(row["low"])
-            high = float(row["high"])
-            close = float(row["close"])
+            # Trail the chandelier only AFTER the partial is taken (staged). Before
+            # that the fixed initial stop stands, so a trade can reach its +2R target
+            # instead of being clipped near breakeven by an early trail. The stop
+            # only ever rises.
+            if self._staged and pos.partial_done:
+                chand = self._chandelier_at(ticker, bar)
+                if chand is not None and chand > pos.effective_stop:
+                    pos.effective_stop = chand
 
-            exit_price: float | None = None
-            reason = ""
-
-            if open_ < pos.stop:          # gap-through stop
-                exit_price = self.costs.fill_exit(open_)
-                reason = "gap_stop"
-            elif low <= pos.stop:          # stop hit intraday
-                exit_price = self.costs.fill_exit(pos.stop)
-                reason = "stop"
-            elif high >= pos.target:       # target hit
-                exit_price = self.costs.fill_exit(pos.target)
-                reason = "target"
-            elif pos.bars_open >= self.bt_cfg.max_hold_bars:  # time-stop
-                exit_price = self.costs.fill_exit(close)
-                reason = "time_stop"
-
-            if exit_price is not None:
-                closed.append(_make_trade(pos, bar, exit_price, reason))
+            actions = decide_exit(
+                entry_fill=pos.entry_fill, risk_per_share=pos.risk_per_share,
+                effective_stop=pos.effective_stop, target_1=pos.target,
+                partial_done=pos.partial_done, bars_held=pos.bars_open,
+                bar_open=float(row["open"]), bar_high=float(row["high"]),
+                bar_low=float(row["low"]), bar_close=float(row["close"]),
+                rules=self.rules,
+            )
+            for act in actions:
+                if act.kind == "MOVE_STOP":
+                    if act.price is not None and act.price > pos.effective_stop:
+                        pos.effective_stop = act.price
+                elif act.kind == "SCALE_OUT":
+                    px = act.price if act.price is not None else pos.target
+                    pos.partial_done = True
+                    pos.partial_frac = act.fraction or 0.0
+                    pos.partial_fill = self.costs.fill_exit(px)
+                elif act.kind == "EXIT_ALL":
+                    px = act.price if act.price is not None else float(row["close"])
+                    closed.append(_make_trade(pos, bar, self.costs.fill_exit(px), act.reason))
+                    break  # fully closed — stop processing this position
 
         return closed
+
+    def _chandelier_at(self, ticker: str, bar: date) -> float | None:
+        """Chandelier trail value at ``bar`` from a per-symbol cached causal series."""
+        series = self._chand.get(ticker)
+        if series is None:
+            df = self.ohlcv_all.get(ticker)
+            if df is None:
+                return None
+            lb = self.settings.risk.chandelier_lookback
+            mult = self.settings.risk.chandelier_multiple
+            # .shift(1): the stop in force during bar t is the chandelier computed
+            # through bar t-1. Without the shift we'd raise the stop using bar t's
+            # OWN high and then check bar t's low against it — a same-bar lookahead
+            # that stops trades out the instant they trail (a classic backtest bug).
+            raw = df["high"].rolling(lb).max() - mult * ind.atr(
+                df["high"], df["low"], df["close"], lb
+            )
+            series = raw.shift(1)
+            self._chand[ticker] = series
+        try:
+            v = series.loc[pd.Timestamp(bar)]
+        except KeyError:
+            return None
+        if isinstance(v, pd.Series):
+            v = v.iloc[-1]
+        return None if pd.isna(v) else float(v)
 
     def _mtm(self, positions: dict[str, _OpenPosition], bar: date) -> float:
         """Mark-to-market unrealised P&L of all open positions at bar close.
@@ -354,7 +398,11 @@ class BacktestRunner:
             row = _bar_at(ohlcv, bar)
             if row is None:
                 continue
-            total += (float(row["close"]) - pos.entry_fill) * pos.shares
+            # Mark the still-open remainder; the scaled-out piece is realised (locked).
+            open_shares = pos.shares * (1.0 - pos.partial_frac)
+            total += (float(row["close"]) - pos.entry_fill) * open_shares
+            if pos.partial_done:
+                total += pos.partial_frac * pos.shares * (pos.partial_fill - pos.entry_fill)
         return total
 
 
@@ -404,6 +452,8 @@ def _make_trade(pos: _OpenPosition, exit_date: date, exit_fill: float, reason: s
         risk_per_share=pos.risk_per_share,
         shares=pos.shares,
         bars_held=pos.bars_open,
+        partial_frac=pos.partial_frac,
+        partial_fill=pos.partial_fill,
     )
 
 

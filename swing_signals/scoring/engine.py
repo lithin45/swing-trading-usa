@@ -18,6 +18,7 @@ from ..factors import register_builtins
 from ..factors.base import NEUTRAL
 from ..factors.registry import all_factors
 from ..risk.base import position_size
+from ..risk.vol_sizing import vol_scalar
 from .levels import compute_levels
 
 if TYPE_CHECKING:
@@ -164,17 +165,46 @@ def generate_signals(
         reasons = [r for s in subscores if s.ok for r in s.reasons]
         flags = list(missing and ["FACTORS_PENDING"] or [])
 
-        # --- hard gate: market regime veto (no new longs) ---
-        if regime.veto:
+        # --- hard gate: market regime (veto, or green-only-entries selectivity) ---
+        green_only = settings.regime.green_only_entries and regime.state != "GREEN"
+        if regime.veto or green_only:
+            why = (
+                f"regime {regime.state} vetoes new longs" if regime.veto
+                else f"green-only entries: regime {regime.state} is not GREEN"
+            )
             no_trades.append(Signal(
                 ticker=ticker, signal_date=sig_date, direction="NO-TRADE",
                 conviction_score=round(score, 1), conviction_tier="None",
                 regime_state=regime.state, factor_contributions=attribution,
                 agreement_score=round(agreement, 2), flags=flags + ["REGIME_VETO"],
                 reasons=reasons,
-                explanation=f"{ticker}: no-trade — regime {regime.state} vetoes new longs",
+                explanation=f"{ticker}: no-trade — {why}",
             ))
             continue
+
+        # --- hard gate: momentum eligibility (long-only into strength) ---
+        # When the momentum factor is active it must confirm a long-eligible name
+        # (uptrend + positive 12-1 + near the 52-week high); an unavailable score
+        # (too little history) is treated as ineligible — fail-safe toward not
+        # trading. Disabled momentum => no gate (backward compatible).
+        mom_ss = next((s for s in subscores if s.name == "momentum"), None)
+        if mom_ss is not None:
+            eligible = mom_ss.ok and bool(mom_ss.raw.get("eligible", False))
+            if not eligible:
+                why = (
+                    mom_ss.reasons[-1]
+                    if (mom_ss.ok and mom_ss.reasons)
+                    else "momentum unconfirmed"
+                )
+                no_trades.append(Signal(
+                    ticker=ticker, signal_date=sig_date, direction="NO-TRADE",
+                    conviction_score=round(score, 1), conviction_tier="None",
+                    regime_state=regime.state, factor_contributions=attribution,
+                    agreement_score=round(agreement, 2),
+                    flags=flags + ["MOMENTUM_INELIGIBLE"], reasons=reasons,
+                    explanation=f"{ticker}: no-trade — {why}",
+                ))
+                continue
 
         # --- hard gate: liquidity ---
         liq_ok, price, dollar_vol = _liquidity_ok(sd, settings)
@@ -228,7 +258,20 @@ def generate_signals(
             chandelier_lookback=settings.risk.chandelier_lookback,
             chandelier_mult=settings.risk.chandelier_multiple,
         )
-        conviction_mult = _TIER_MULT[tier] * regime.multiplier * macro_multiplier
+        # Volatility-scaled sizing: shrink size for high-ATR names / high-vol markets.
+        # Flows everywhere via conviction_mult -> effective risk %, so it sizes down
+        # the engine's shares, the backtest, and the live order (which sizes off
+        # suggested_risk_pct) alike. Only ever reduces size (caps at 1.0).
+        vscalar = 1.0
+        if settings.sizing.vol_scaling_enabled:
+            vscalar = vol_scalar(
+                atr_pct=(atr14 / price * 100.0) if price > 0 else None,
+                vol_target_atr_pct=settings.sizing.vol_target_atr_pct,
+                market_vol_score=regime.raw.get("vol_pillar"),
+                scalar_min=settings.sizing.vol_scalar_min,
+                scalar_max=settings.sizing.vol_scalar_max,
+            )
+        conviction_mult = _TIER_MULT[tier] * regime.multiplier * macro_multiplier * vscalar
         size = position_size(
             equity=settings.account.equity, entry=levels.entry, stop=levels.stop,
             risk_pct=settings.account.risk_pct, risk_pct_ceiling=settings.account.risk_pct_ceiling,
@@ -268,6 +311,8 @@ def generate_signals(
     selected: list[Signal] = []
     heat = 0.0
     heat_cap = settings.risk.portfolio_heat_cap
+    sector_counts: dict[str, int] = {}
+    max_per_sector = settings.risk.max_per_sector
     for sig in actionable:
         if len(selected) >= settings.risk.max_positions:
             sig.flags.append("CAPPED_MAX_POSITIONS")
@@ -277,7 +322,17 @@ def generate_signals(
             sig.flags.append("CAPPED_HEAT")
             no_trades.append(sig_to_no_trade(sig, "portfolio heat cap reached"))
             continue
+        # Correlation cap: limit concurrent names sharing a sector/theme so a basket
+        # of, say, semis counts as one crowded bet (sector populated by the caller;
+        # None => uncapped, e.g. in the backtest).
+        sd_sec = data[sig.ticker].sector if sig.ticker in data else None
+        if sd_sec and sector_counts.get(sd_sec, 0) >= max_per_sector:
+            sig.flags.append("CAPPED_SECTOR")
+            no_trades.append(sig_to_no_trade(sig, f"max per sector reached ({sd_sec})"))
+            continue
         heat += sig.suggested_risk_pct or 0
+        if sd_sec:
+            sector_counts[sd_sec] = sector_counts.get(sd_sec, 0) + 1
         sig.rank = len(selected) + 1
         selected.append(sig)
 

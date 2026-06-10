@@ -84,6 +84,12 @@ def build_panel(df: pd.DataFrame) -> pd.DataFrame:
             "obv_ema": ind.ema(obv, 20),
             "obv_rising": obv > obv.shift(1),
             "mom6": close / close.shift(126) - 1.0,
+            # Momentum (f08) + setup (f09) inputs — kept here so the backtest's
+            # single per-symbol panel feeds every factor. All are causal (rolling
+            # max / backward shifts), so the as-of row matches a live recompute.
+            "high_252": high.rolling(252).max(),
+            "high_60": high.rolling(60).max(),
+            "mom_12_1": close.shift(21) / close.shift(252) - 1.0,
         }
     )
 

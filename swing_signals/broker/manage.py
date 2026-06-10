@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..config_loader import resolve_db_url
+from ..exits import build_rules, decide_exit
 from ..factors import indicators as ind
 from .alpaca_client import AlpacaBroker
 
@@ -117,7 +118,12 @@ def reconcile_and_manage(
                 elif trade.status == "open":
                     args = (broker, settings, trade, today, now, positions, loader,
                             report, dry_run, offline)
-                    (_manage_open_bracket if bracket else _manage_open)(*args)
+                    if settings.exits.mode == "staged":
+                        _manage_open_staged(*args)
+                    elif bracket:
+                        _manage_open_bracket(*args)
+                    else:
+                        _manage_open(*args)
                 elif trade.status == "closing":
                     _sync_closing(broker, trade, today, now, report, dry_run)
             except Exception as exc:  # noqa: BLE001 - one bad symbol must not stop the loop
@@ -246,6 +252,108 @@ def _manage_open(
     # 3) not exiting -> keep a standalone STOP-DAY protective order at the effective stop
     if bro.place_protective_stops and eff is not None and not dry_run:
         _refresh_protective_stop(broker, trade, pos, eff, today, now, report)
+
+
+def _manage_open_staged(
+    broker, settings, trade, today, now, positions, loader, report, dry_run, offline
+) -> None:
+    """Staged exits on a live position: partial at target, breakeven, trail, conditional time-stop.
+
+    The researched ``exits.mode=staged`` behaviour, delegating the *decision* to the
+    shared ``decide_exit`` (so live, backtest, and tracker agree). Because Alpaca
+    brackets can't scale a partial out, a bracket position is transitioned to a
+    self-managed STOP-DAY the first time it's seen here.
+    """
+    pos: BrokerPosition | None = positions.get(trade.symbol)
+    if pos is None:  # position gone -> reconcile which leg/stop filled
+        if trade.order_class == "bracket":
+            _reconcile_bracket_exit(broker, trade, today, now, report, dry_run)
+        else:
+            _reconcile_missing_position(broker, trade, today, now, report, dry_run)
+        return
+
+    bro = settings.broker
+
+    # Legacy-opened bracket -> cancel the server-side OCO legs and self-manage (once).
+    if trade.order_class == "bracket" and (trade.take_profit_order_id or trade.stop_loss_order_id):
+        if not dry_run:
+            for oid in (trade.take_profit_order_id, trade.stop_loss_order_id):
+                if oid:
+                    broker.cancel_order(oid)
+            trade.take_profit_order_id = None
+            trade.stop_loss_order_id = None
+            trade.order_class = "simple"
+            trade.updated_at = now
+
+    df = _recent_ohlcv(loader, trade.symbol, trade.entry_fill_date, today, offline)
+    rules = build_rules(settings, bro.max_hold_bars)
+    partial_done = bool(trade.partial_done)
+    eff = trade.effective_stop if trade.effective_stop is not None else trade.stop_price
+
+    # Trail the chandelier ONLY after the partial (matches backtest/tracker); stop only rises.
+    if partial_done:
+        chand = _chandelier(
+            df, settings.risk.chandelier_lookback, settings.risk.chandelier_multiple
+        )
+        if chand is not None and (eff is None or chand > eff):
+            eff = chand
+            if not dry_run:
+                trade.effective_stop = eff
+                trade.chandelier_stop = chand
+
+    entry = trade.actual_entry or 0.0
+    rps = trade.risk_per_share or 0.0
+    if rps <= 0 and entry and trade.stop_price is not None:
+        rps = entry - trade.stop_price
+
+    sold_this_cycle = 0.0
+    if df is not None and len(df) > 0 and eff is not None and entry > 0 and rps > 0:
+        last = df.iloc[-1]
+        actions = decide_exit(
+            entry_fill=entry, risk_per_share=rps, effective_stop=eff,
+            target_1=trade.target_price or (entry + 2.0 * rps),
+            partial_done=partial_done, bars_held=_bars_held(trade.entry_fill_date, today),
+            bar_open=float(last["open"]), bar_high=float(last["high"]),
+            bar_low=float(last["low"]), bar_close=float(last["close"]), rules=rules,
+        )
+        for act in actions:
+            if act.kind == "MOVE_STOP":
+                if act.price is not None and (eff is None or act.price > eff):
+                    eff = act.price
+                    if not dry_run:
+                        trade.effective_stop = eff
+            elif act.kind == "SCALE_OUT":
+                sell_qty = round((act.fraction or 0.0) * pos.qty, 6)
+                if sell_qty > 0:
+                    coid = f"swing-{today:%Y%m%d}-{trade.symbol}-partial"
+                    if not dry_run:
+                        _cancel_protective(broker, trade)  # re-placed on the remainder below
+                        broker.submit_sell(trade.symbol, qty=sell_qty, order_type="market",
+                                           client_order_id=coid)
+                        trade.partial_done = True
+                        trade.partial_qty = sell_qty
+                        trade.partial_fill_price = act.price
+                        trade.partial_fill_date = today
+                        trade.updated_at = now
+                    sold_this_cycle = sell_qty
+                    report.exits_submitted.append((trade.symbol, "target_partial"))
+            elif act.kind == "EXIT_ALL":
+                coid = f"swing-{today:%Y%m%d}-{trade.symbol}-exit"
+                if not dry_run:
+                    _cancel_protective(broker, trade)
+                    o = broker.submit_sell(trade.symbol, qty=pos.qty, order_type="market",
+                                           client_order_id=coid)
+                    trade.exit_order_id = o.id
+                    trade.exit_reason = act.reason
+                    trade.status = "closing"
+                    trade.updated_at = now
+                report.exits_submitted.append((trade.symbol, act.reason))
+                return  # fully closing
+
+    # Not exiting -> keep a STOP-DAY protective order on the REMAINING shares.
+    remaining = max(0.0, pos.qty - sold_this_cycle)
+    if bro.place_protective_stops and eff is not None and remaining > 0 and not dry_run:
+        _refresh_protective_stop(broker, trade, pos, eff, today, now, report, qty=remaining)
 
 
 def _sync_closing(broker, trade, today, now, report, dry_run) -> None:
@@ -400,10 +508,22 @@ def _finalize_closed(trade, exit_price, exit_date, reason, now) -> None:
     trade.exit_reason = reason
     trade.bars_held = _bars_held(trade.entry_fill_date, exit_date)
     if exit_price is not None and entry:
-        trade.pnl = round((exit_price - entry) * qty, 4)
-        trade.pct_return = round(exit_price / entry - 1.0, 4)
-        if trade.risk_per_share:
-            trade.realized_r = round((exit_price - entry) / trade.risk_per_share, 4)
+        pq = trade.partial_qty or 0.0
+        pf = trade.partial_fill_price
+        if trade.partial_done and pq > 0 and pf is not None and qty > 0:
+            # Staged scale-out: blend the partial leg (sold at the target) with the
+            # remainder (exited now), qty-weighted, so realized R / P&L are one number.
+            rem = max(0.0, qty - pq)
+            trade.pnl = round(pq * (pf - entry) + rem * (exit_price - entry), 4)
+            avg_exit = (pq * pf + rem * exit_price) / qty
+            trade.pct_return = round(avg_exit / entry - 1.0, 4)
+            if trade.risk_per_share:
+                trade.realized_r = round((avg_exit - entry) / trade.risk_per_share, 4)
+        else:
+            trade.pnl = round((exit_price - entry) * qty, 4)
+            trade.pct_return = round(exit_price / entry - 1.0, 4)
+            if trade.risk_per_share:
+                trade.realized_r = round((exit_price - entry) / trade.risk_per_share, 4)
     trade.updated_at = now
 
 
@@ -426,17 +546,23 @@ def _cancel_protective(broker, trade) -> None:
         trade.protective_order_id = None
 
 
-def _refresh_protective_stop(broker, trade, pos, eff, today, now, report) -> None:
-    """Re-place a fractional STOP-DAY sell at the current effective stop (DAY orders expire)."""
+def _refresh_protective_stop(broker, trade, pos, eff, today, now, report, *, qty=None) -> None:
+    """Re-place a STOP-DAY sell at the current effective stop (DAY orders expire).
+
+    ``qty`` defaults to the whole position; the staged path passes the post-partial
+    remainder so the resting stop never tries to sell more shares than are held.
+    """
+    q = pos.qty if qty is None else qty
     pid = trade.protective_order_id
     existing = broker.get_order_by_id(pid) if pid else None
-    if existing is not None and existing.is_open and existing.stop_price == round(eff, 2):
-        return  # already protected at this level today
+    if (existing is not None and existing.is_open
+            and existing.stop_price == round(eff, 2) and existing.qty == q):
+        return  # already protected at this level + size today
     if existing is not None and existing.is_open:
         broker.cancel_order(existing.id)
     coid = f"swing-{today:%Y%m%d}-{trade.symbol}-stop"
     o = broker.submit_sell(
-        trade.symbol, qty=pos.qty, order_type="stop", stop_price=eff, client_order_id=coid
+        trade.symbol, qty=q, order_type="stop", stop_price=eff, client_order_id=coid
     )
     trade.protective_order_id = o.id
     trade.updated_at = now

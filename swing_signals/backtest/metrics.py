@@ -29,22 +29,41 @@ class Trade:
     exit_fill: float          # cost-adjusted exit price
     exit_reason: str          # "stop" | "target" | "time_stop" | "gap_stop"
     stop: float               # initial stop price (ATR-based)
-    target: float             # initial target price
+    target: float             # initial (first/partial) target price
     risk_per_share: float     # entry_fill - stop (1R in $)
     shares: float
     bars_held: int
 
+    # Staged-exit partial scale-out (0 = none): a fraction sold at the first target,
+    # the rest exited at exit_fill. Realized R / P&L blend the two legs so a scaled
+    # trade is still ONE logical trade with one blended R (honest expectancy).
+    partial_frac: float = 0.0    # fraction scaled out at the first target
+    partial_fill: float = 0.0    # cost-adjusted fill price of the scaled-out piece
+
     # Derived fields — computed automatically by the runner
-    realized_r: float = 0.0      # (exit_fill - entry_fill) / risk_per_share
-    realized_pct: float = 0.0    # (exit_fill / entry_fill) - 1
-    pnl_dollars: float = 0.0     # (exit_fill - entry_fill) * shares
+    realized_r: float = 0.0      # blended (exit - entry) / risk_per_share
+    realized_pct: float = 0.0    # blended (exit / entry) - 1
+    pnl_dollars: float = 0.0     # blended (exit - entry) * shares
 
     def __post_init__(self) -> None:
+        rem = 1.0 - self.partial_frac
         if self.risk_per_share > 0:
-            self.realized_r = (self.exit_fill - self.entry_fill) / self.risk_per_share
+            rem_r = (self.exit_fill - self.entry_fill) / self.risk_per_share
+            part_r = (self.partial_fill - self.entry_fill) / self.risk_per_share
+            self.realized_r = (self.partial_frac * part_r + rem * rem_r
+                               if self.partial_frac > 0 else rem_r)
         if self.entry_fill > 0:
-            self.realized_pct = self.exit_fill / self.entry_fill - 1.0
-        self.pnl_dollars = (self.exit_fill - self.entry_fill) * self.shares
+            rem_pct = self.exit_fill / self.entry_fill - 1.0
+            part_pct = self.partial_fill / self.entry_fill - 1.0
+            self.realized_pct = (self.partial_frac * part_pct + rem * rem_pct
+                                 if self.partial_frac > 0 else rem_pct)
+        if self.partial_frac > 0:
+            self.pnl_dollars = (
+                self.partial_frac * self.shares * (self.partial_fill - self.entry_fill)
+                + rem * self.shares * (self.exit_fill - self.entry_fill)
+            )
+        else:
+            self.pnl_dollars = (self.exit_fill - self.entry_fill) * self.shares
 
 
 def compute_metrics(
@@ -104,8 +123,11 @@ def compute_metrics(
         for sym, rs_ in by_ticker.items()
     }
 
+    trades_per_month = (n / (n_trading_days / 21.0)) if n_trading_days > 0 else 0.0
+
     return {
         "n_trades": n,
+        "trades_per_month": round(trades_per_month, 2),
         "win_rate": round(win_rate, 4),
         "expectancy": round(expectancy, 4),
         "avg_win_r": round(avg_win_r, 4),
@@ -173,6 +195,7 @@ def _sortino(daily_rets: list[float], rf: float = 0.0) -> float:
 def _empty_metrics(equity_start: float) -> dict[str, Any]:
     return {
         "n_trades": 0,
+        "trades_per_month": 0.0,
         "win_rate": 0.0,
         "expectancy": 0.0,
         "avg_win_r": 0.0,
