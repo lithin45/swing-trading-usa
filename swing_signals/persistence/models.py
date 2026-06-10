@@ -147,6 +147,9 @@ class Trade(Base):
     partial_qty: Mapped[float | None] = mapped_column(default=None)  # shares sold at the 1st target
     partial_fill_price: Mapped[float | None] = mapped_column(default=None)
     partial_fill_date: Mapped[date | None] = mapped_column(default=None)
+    # The partial sell order, until its real fill is reconciled (then cleared). While set,
+    # partial_qty/partial_fill_price are the submitted qty / theoretical target, not the fill.
+    partial_order_id: Mapped[str | None] = mapped_column(String(64), default=None)
 
     # --- bracket child legs (native OCO; server-side stop+target) ---
     take_profit_order_id: Mapped[str | None] = mapped_column(String(64), default=None)

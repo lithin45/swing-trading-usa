@@ -136,3 +136,101 @@ def test_all_exit_reasons_are_valid():
     result = runner.run(date(2022, 1, 1), date(2022, 12, 31))
     for trade in result.trades:
         assert trade.exit_reason in valid, f"unexpected exit reason: {trade.exit_reason}"
+
+
+# ── Portfolio realism: caps, cash, limit-entry mechanics ───────────────────
+
+def _mini_runner(ohlcv_all, *, equity=100_000.0, max_positions=8, heat_cap=0.10,
+                 entry_type="limit", market_fallback=True, exits_mode=None):
+    settings = load_settings()
+    settings.risk.max_positions = max_positions
+    settings.risk.portfolio_heat_cap = heat_cap
+    settings.broker.entry_order_type = entry_type
+    settings.broker.market_fallback = market_fallback
+    if exits_mode is not None:
+        settings.exits.mode = exits_mode
+    bt_cfg = BacktestCfg(
+        start="2022-01-01", end="2022-12-31",
+        cost_bps=0.0, max_hold_bars=20, warmup_bars=210, equity_start=equity,
+    )
+    index_ohlcv = {s: _ohlcv("2020-01-01", n=800, close_start=300, slope=0.6)
+                   for s in ["SPY", "QQQ", "IWM"]}
+    return BacktestRunner(settings=settings, bt_cfg=bt_cfg,
+                          ohlcv_all=ohlcv_all, index_ohlcv=index_ohlcv,
+                          secrets=load_secrets())
+
+
+def test_max_positions_binds_across_days():
+    """Open positions accumulated over many days never exceed risk.max_positions."""
+    settings = load_settings()
+    syms = settings.watchlist.symbols
+    ohlcv_all = {s: _ohlcv("2020-01-01", n=800, close_start=50 + i * 5, slope=0.3)
+                 for i, s in enumerate(syms)}
+    runner = _mini_runner(ohlcv_all, max_positions=2)
+    res = runner.run(date(2022, 1, 1), date(2022, 12, 31))
+    assert len(res.trades) > 2  # the cap forces turnover, not a single static pair
+    # Reconstruct concurrent holdings from the trade ledger.
+    events = []
+    for t in res.trades:
+        events.append((t.entry_date, 1))
+        events.append((t.exit_date, -1))
+    concurrent = 0
+    peak = 0
+    for _, delta in sorted(events, key=lambda e: (e[0], -e[1])):
+        concurrent += delta
+        peak = max(peak, concurrent)
+    assert peak <= 2, f"held {peak} concurrent positions with max_positions=2"
+
+
+def test_cash_constraint_no_leverage():
+    """Sum of simultaneously-open entry notional stays near the equity high-water.
+
+    The old runner debited nothing at entry, so dozens of concurrent full-size
+    positions could ride on the same dollars; with cash accounting each fill is
+    clamped to what is actually available.
+    """
+    settings = load_settings()
+    syms = settings.watchlist.symbols
+    ohlcv_all = {s: _ohlcv("2020-01-01", n=800, close_start=50 + i * 5, slope=0.3)
+                 for i, s in enumerate(syms)}
+    runner = _mini_runner(ohlcv_all, equity=10_000.0, exits_mode="legacy")
+    res = runner.run(date(2022, 1, 1), date(2022, 12, 31))
+    peak_equity = max(res.equity_curve)
+    days = pd.date_range("2022-01-01", "2022-12-31", freq="B").date
+    for d in days:
+        open_notional = sum(
+            t.entry_fill * t.shares for t in res.trades
+            if t.entry_date <= d < t.exit_date
+        )
+        # 5% slack: cash freed by underwater exits can be redeployed at the
+        # high-water while older positions still carry their entry notional.
+        assert open_notional <= peak_equity * 1.05 + 1e-6
+
+
+def test_limit_entry_fills_only_when_touched():
+    """A breakaway gap-and-go above the limit must NOT fill (the live limit wouldn't)."""
+    idx = pd.bdate_range(start="2020-01-01", periods=800)
+    n = len(idx)
+    close = np.array([50 + i * 0.30 for i in range(n)])
+    df = pd.DataFrame({
+        "open": close * 0.999, "high": close * 1.005, "low": close * 0.995,
+        "close": close, "volume": np.full(n, 2_000_000),
+    }, index=idx)
+    # From bar 600 on: every day gaps up and never trades back to the prior close
+    # (low is 3% ABOVE it), so a limit resting at the signal close cannot fill.
+    closes = list(close)
+    for i in range(600, n):
+        prev = closes[i - 1]
+        closes[i] = prev * 1.05
+        df.iloc[i, df.columns.get_loc("open")] = prev * 1.04
+        df.iloc[i, df.columns.get_loc("low")] = prev * 1.03
+        df.iloc[i, df.columns.get_loc("close")] = closes[i]
+        df.iloc[i, df.columns.get_loc("high")] = closes[i] * 1.01
+
+    runner = _mini_runner({"AAPL": df}, market_fallback=False)
+    res = runner.run(date(2022, 1, 1), date(2022, 12, 31))
+    gap_start = idx[600].date()
+    assert all(t.entry_date < gap_start for t in res.trades), (
+        "limit entries filled inside the runaway-gap regime where low never touched the limit"
+    )
+    assert res.n_unfilled > 0  # the aged-out orders are counted, not silently dropped

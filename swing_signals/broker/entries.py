@@ -99,10 +99,19 @@ def submit_entries(
     from ..universe.thematic import sector_map
 
     account = broker.get_account()
-    held = {p.symbol for p in broker.list_positions()}
+    live_positions = broker.list_positions()
+    held = {p.symbol for p in live_positions}
     open_buys = {o.symbol for o in broker.list_open_orders() if o.side == "buy"}
     sector_of = sector_map()  # symbol -> sector/theme for the correlation cap
     now = datetime.now()
+
+    # Batch-level capital tracking. The account is snapshotted ONCE; without local
+    # decrements every order in the batch would size against the same untouched
+    # buying power, and a batch could collectively run past it (Alpaca paper grants
+    # ~2x equity) into leveraged gross exposure the config never asked for.
+    bp_left = account.buying_power
+    gross_notional = sum(abs(p.market_value) for p in live_positions)
+    gross_cap = account.equity * settings.risk.max_gross_exposure
 
     with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
         signals = repo.get_signals_for_day(session, today)
@@ -144,6 +153,10 @@ def submit_entries(
             # Size off LIVE equity (tracks the real paper account) or the engine's number.
             if bro.size_from_live_equity and account.equity > 0:
                 desired = (account.equity * risk_pct) / rps
+                # Same concentration cap position_size applies on the engine path:
+                # a calm name's tight stop must not buy half the account.
+                cap_shares = (account.equity * settings.risk.max_position_notional_pct) / entry_px
+                desired = min(desired, cap_shares)
             else:
                 desired = (sig.suggested_shares or 0.0) * gate.derisk_multiplier
 
@@ -160,7 +173,7 @@ def submit_entries(
             if use_bracket:
                 oq = to_alpaca_order_qty(
                     suggested_shares=desired, entry_price=entry_px,
-                    buying_power=account.buying_power, min_order_usd=bro.min_order_usd,
+                    buying_power=bp_left, min_order_usd=bro.min_order_usd,
                     whole_share_only=True,
                 )
                 if (not oq.ok or oq.qty is None) and bro.entry_class == "auto":
@@ -168,11 +181,19 @@ def submit_entries(
             if not use_bracket:
                 oq = to_alpaca_order_qty(
                     suggested_shares=desired, entry_price=entry_px,
-                    buying_power=account.buying_power, min_order_usd=bro.min_order_usd,
+                    buying_power=bp_left, min_order_usd=bro.min_order_usd,
                     whole_share_only=bro.whole_share_only,
                 )
             if not oq.ok or oq.qty is None:
                 report.skipped_size.append((sym, oq.skipped_reason or "size skip"))
+                continue
+
+            new_notional = oq.notional if oq.notional is not None else oq.qty * entry_px
+            if gross_notional + new_notional > gross_cap + 1e-6:
+                report.skipped_gated.append(
+                    (sym, f"gross exposure cap reached "
+                          f"({settings.risk.max_gross_exposure:.0%} of equity)")
+                )
                 continue
 
             klass = "bracket" if use_bracket else "simple"
@@ -218,6 +239,8 @@ def submit_entries(
             report.submitted.append(sym)
             gate.open_positions += 1  # apply caps within this batch too
             gate.open_heat_pct += risk_pct
+            bp_left = max(0.0, bp_left - new_notional)
+            gross_notional += new_notional
             sec = sector_of.get(sym)
             if sec:
                 gate.sector_counts[sec] = gate.sector_counts.get(sec, 0) + 1

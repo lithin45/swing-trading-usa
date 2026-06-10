@@ -7,6 +7,7 @@ import streamlit as st
 st.set_page_config(page_title="Signals & Outcomes", page_icon="🎯", layout="wide")
 
 from _auth import require_auth  # noqa: E402
+from _charts import cumulative_r, r_histogram  # noqa: E402
 from _data import load_signals, load_trades, trade_stats  # noqa: E402
 
 require_auth()
@@ -29,7 +30,20 @@ else:
 
     closed = trades[trades["status"] == "closed"]
     if "realized_r" in closed and not closed.empty:
-        st.bar_chart(closed.set_index("symbol")["realized_r"], height=240)
+        left, right = st.columns(2)
+        with left:
+            st.caption("R distribution — the asymmetric payoff is the whole strategy: "
+                       "many small losses, a few large wins.")
+            st.plotly_chart(r_histogram(closed), width="stretch")
+        with right:
+            st.caption("Cumulative realized R — the expectancy accruing over time.")
+            st.plotly_chart(cumulative_r(closed), width="stretch")
+
+        if "exit_reason" in closed:
+            st.caption("Exits by reason")
+            reason = closed.groupby("exit_reason")["realized_r"].agg(["count", "mean"])
+            reason.columns = ["trades", "avg R"]
+            st.dataframe(reason.round(2), width="stretch")
 
 st.subheader("All tracked trades")
 if not trades.empty:

@@ -126,6 +126,13 @@ class RiskCfg(StrictModel):
     monthly_loss_halt: float = Field(gt=0, le=1)
     drawdown_derisk: float = Field(gt=0, le=1)
     drawdown_hard_halt: float = Field(gt=0, le=1)
+    # Concentration caps. Risk-at-stop sizing alone gives the LARGEST dollar exposure
+    # to the LOWEST-volatility names (notional/equity = risk% / stop%), so a calm
+    # mega-cap could absorb half the account; the real tail risk there is a gap
+    # THROUGH the stop, which only a notional bound contains. Defaults keep old
+    # configs loading (and the gross cap at 1.0 = never lever the account).
+    max_position_notional_pct: float = Field(default=0.20, gt=0, le=1)
+    max_gross_exposure: float = Field(default=1.0, gt=0, le=2)
 
 
 class UniverseCfg(StrictModel):

@@ -71,12 +71,18 @@ risk:
   monthly_loss_halt: 0.10
   drawdown_derisk: 0.10             # cut risk 50% when -10% from peak
   drawdown_hard_halt: 0.15          # full halt + review at -15%
+  # Concentration caps: risk-at-stop sizing gives the LARGEST dollar position to the
+  # LOWEST-vol names (1% risk / 2% stop = 50% of equity!) — bound the gap risk a stop
+  # can't contain. Gross cap 1.0 = entries never lever the account (Alpaca grants 2x).
+  max_position_notional_pct: 0.20   # one position <= 20% of equity
+  max_gross_exposure: 1.0           # sum of open notionals <= 100% of equity
 
 # Exit state machine (swing_signals/exits.py). mode=legacy reproduces the original
 # full-exit-at-target + hard 20-bar time-stop. mode=staged is the researched upgrade:
 # scale a partial out at the first target, ratchet to breakeven, ride a chandelier
-# trail with NO hard time cap, and time-cut only stagnant trades. Keep `legacy` until
-# the staged live-order plumbing is validated on paper, then flip to `staged`.
+# trail with NO hard time cap, and time-cut only stagnant trades.
+# STATUS: staged has been LIVE on the paper account since 2026-06-09 (deployed via
+# PR #1, fake-broker validated; watch the manage runs). Rollback = set `legacy`.
 exits:
   mode: staged                      # legacy | staged  (staged = partial profit + let winners run)
   partial_take_frac: 0.5            # fraction sold at the first (2R) target in staged mode
@@ -155,4 +161,4 @@ backtest:
   cost_bps: 10.0
   max_hold_bars: 20
   warmup_bars: 210
-  equity_start: 200000.0
+  equity_start: 100000.0   # = account.equity, so $ figures are comparable to the live account

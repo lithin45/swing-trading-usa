@@ -103,21 +103,30 @@ def main(argv: list[str] | None = None) -> int:
             offline=args.offline,
         )
 
+    # The dead-man's switch must cover EVERY scheduled command, not just the signal
+    # run: a trade/manage/track job that crashes (or silently stops being scheduled)
+    # is exactly the failure mode healthchecks.io exists to surface.
     if args.command == "track":
         from .tracking.outcomes import run_tracker
-        return run_tracker(settings=settings, secrets=secrets, offline=args.offline)
+        rc = run_tracker(settings=settings, secrets=secrets, offline=args.offline)
+        ping(secrets.healthcheck_url, fail=rc != 0)
+        return rc
 
     if args.command == "trade":
         from .broker.run import run_trade
-        return run_trade(
+        rc = run_trade(
             settings=settings, secrets=secrets, dry_run=args.dry_run, offline=args.offline
         )
+        ping(None if args.dry_run else secrets.healthcheck_url, fail=rc != 0)
+        return rc
 
     if args.command == "manage":
         from .broker.run import run_manage
-        return run_manage(
+        rc = run_manage(
             settings=settings, secrets=secrets, dry_run=args.dry_run, offline=args.offline
         )
+        ping(None if args.dry_run else secrets.healthcheck_url, fail=rc != 0)
+        return rc
 
     # Default: daily run (``swing-signals`` or ``swing-signals run``).
     dry_run = args.dry_run or settings.alerts.dry_run_default

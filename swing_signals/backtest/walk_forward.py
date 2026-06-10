@@ -10,6 +10,12 @@ All OOS windows are concatenated into the final OOS equity curve.
 
 File-11 threshold: if OOS performance is dramatically worse than IS across all
 folds, the strategy is overfit — simplify rather than re-optimise.
+
+HONESTY NOTE: nothing is *fit* in the IS window — the same fixed config runs on
+both halves. So an IS≈OOS result here demonstrates *regime stability* (the edge
+isn't confined to one sub-period), NOT absence of overfitting. The overfitting
+risk lives in the human loop (params hand-tuned against full-period backtests);
+treat any param iterated against these results as in-sample thereafter.
 """
 
 from __future__ import annotations

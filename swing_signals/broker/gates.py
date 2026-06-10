@@ -68,6 +68,10 @@ def evaluate_gates(
         sector_counts=sector_counts,
     )
 
+    # --- broker-side circuit breaker: a blocked account can't trade anyway ---
+    if account.trading_blocked or account.account_blocked:
+        return _halt(state, "account/trading blocked at the broker")
+
     # --- drawdown from peak equity (peak over snapshot history + now) ---
     equities = [float(s.equity) for s in snapshots] + [equity]
     peak = max(equities) if equities else equity

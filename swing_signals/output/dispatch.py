@@ -46,6 +46,16 @@ def build_alerters(settings: Settings, secrets: Secrets) -> list[Alerter]:
     return alerters
 
 
+def _scrub(exc: Exception) -> str:
+    """Exception text safe for (public CI) logs — Telegram embeds its token in URLs."""
+    from ..data.retry import sanitize_url
+
+    text = str(exc)
+    if "/bot" in text:
+        return f"{type(exc).__name__}: {sanitize_url(text.split(' for url', 1)[0])}"
+    return text
+
+
 def dispatch(alerters: list[Alerter], subject: str, body: str) -> int:
     """Send the report to every channel; return how many succeeded."""
     sent = 0
@@ -54,7 +64,7 @@ def dispatch(alerters: list[Alerter], subject: str, body: str) -> int:
             alerter.send(subject, body)
             sent += 1
         except Exception as exc:  # noqa: BLE001 - one channel failing must not stop others
-            log.warning("alert via %s failed: %s", alerter.name, exc)
+            log.warning("alert via %s failed: %s", alerter.name, _scrub(exc))
     return sent
 
 
@@ -66,5 +76,5 @@ def dispatch_failure(alerters: list[Alerter], error: str) -> int:
             alerter.send_failure_alert(error)
             sent += 1
         except Exception as exc:  # noqa: BLE001
-            log.warning("failure-alert via %s failed: %s", alerter.name, exc)
+            log.warning("failure-alert via %s failed: %s", alerter.name, _scrub(exc))
     return sent

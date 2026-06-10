@@ -71,7 +71,7 @@ class FakeBroker:
 
     def cancel_order(self, oid):
         o = self._orders.get(oid)
-        if o is not None:
+        if o is not None and not o.is_filled:  # Alpaca: canceling a filled order is a no-op
             self._orders[oid] = replace(o, status="canceled")
 
     def get_latest_price(self, symbol):
@@ -152,7 +152,11 @@ def test_pending_fill_becomes_open(tmp_path, monkeypatch):
     t = _read(s.run.db_url)
     assert t["status"] == "open"
     assert t["actual_entry"] == 99.5
-    assert t["risk_per_share"] == 5.5  # 99.5 - 94
+    # Fill deviated >0.1% from the planned 100.0 entry -> stop/target re-anchor to the
+    # actual fill at the SAME dollar distances (6 below, 12 above), preserving sized risk.
+    assert t["stop_price"] == 93.5
+    assert t["target_price"] == 111.5
+    assert t["risk_per_share"] == 6.0
     assert t["entry_fill_date"] == DAY
 
 
@@ -351,3 +355,192 @@ def test_staged_blended_realized_r_on_close(tmp_path, monkeypatch):
     assert t["status"] == "closed"
     assert t["realized_r"] == 1.0    # avg exit (112+100)/2 = 106 -> (106-100)/6
     assert t["pnl"] == 12.0          # 1*(112-100) + 1*(100-100)
+
+
+# --- fill-state edge cases: partial fills, races, orphans, stale data ----------
+
+def _order2(oid, symbol, side, type_, status, *, qty=1.5, filled_qty=0.0, fill=None,
+            coid="", stop_price=None):
+    """Like _order but with independent filled_qty (partial-fill states)."""
+    return BrokerOrder(
+        id=oid, client_order_id=coid, symbol=symbol, side=side, type=type_, status=status,
+        qty=qty, notional=None, limit_price=None, stop_price=stop_price,
+        filled_qty=filled_qty, filled_avg_price=fill,
+    )
+
+
+def test_partial_fill_then_expired_is_adopted_not_rebought(tmp_path, monkeypatch):
+    """A DAY limit that part-fills then expires must NOT re-order the full size."""
+    s = _settings(tmp_path)
+    _seed(s.run.db_url, status="pending_entry", entry_order_id="E1", qty=10.0,
+          limit_price=100.0, stop_price=94.0, target_price=112.0, pending_days=0)
+    broker = FakeBroker(orders=[_order2("E1", "AAPL", "buy", "limit", "expired",
+                                        qty=10.0, filled_qty=4.0, fill=100.0)])
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(None))
+    t = _read(s.run.db_url)
+    assert t["status"] == "open"
+    assert t["filled_qty"] == 4.0
+    assert t["actual_entry"] == 100.0
+    assert [o for o in broker.submitted if o.side == "buy"] == []  # no full-size re-buy
+    assert "AAPL" in rep.filled_entries
+
+
+def test_market_fallback_fill_reanchors_stop_and_target(tmp_path, monkeypatch):
+    """A fallback fill far above the plan re-bases stop/target at the same R distances."""
+    s = _settings(tmp_path)
+    _seed(s.run.db_url, status="pending_entry", entry_order_id="E1", qty=2.0,
+          limit_price=100.0, stop_price=94.0, target_price=112.0, effective_stop=94.0)
+    broker = FakeBroker(orders=[_order2("E1", "AAPL", "buy", "market", "filled",
+                                        qty=2.0, filled_qty=2.0, fill=106.0)])
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                         loader=FakeLoader(None))
+    t = _read(s.run.db_url)
+    assert t["stop_price"] == 100.0      # 106 - 6
+    assert t["target_price"] == 118.0    # 106 + 12
+    assert t["effective_stop"] == 100.0
+    assert t["risk_per_share"] == 6.0
+
+
+def test_protective_restop_same_day_uses_fresh_coid(tmp_path, monkeypatch):
+    """A same-day re-placement must not reuse the canceled stop's client_order_id."""
+    s = _settings(tmp_path)
+    _seed(s.run.db_url, status="open", qty=1.5, stop_price=80.0, effective_stop=80.0,
+          target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
+    pos = BrokerPosition("AAPL", 1.5, 100.0, 150.0, 0.0, 100.0)
+    broker = FakeBroker(positions=[pos])
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                         loader=FakeLoader(_ohlcv(last_low=99.0, last_high=101.0)))
+    # later the same day: tighter, higher bars -> the chandelier ratchets -> re-place
+    df2 = _ohlcv(last_low=110.0, last_high=112.0, hi=112.0, lo=109.0, close=111.0)
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                         loader=FakeLoader(df2))
+    stops = [o for o in broker.submitted if o.type == "stop"]
+    assert len(stops) == 2
+    assert stops[0].client_order_id != stops[1].client_order_id
+    assert broker._orders[stops[0].id].status == "canceled"
+
+
+def test_exit_decision_uses_prior_stop_not_same_bar_ratchet(tmp_path, monkeypatch):
+    """Today's ratcheted trail may not claim today's low (mirrors backtest shift(1))."""
+    s = _settings(tmp_path)
+    _seed(s.run.db_url, status="open", qty=1.5, stop_price=80.0, effective_stop=80.0,
+          target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
+    pos = BrokerPosition("AAPL", 1.5, 100.0, 150.0, 0.0, 100.0)
+    broker = FakeBroker(positions=[pos])
+    # Tight range: chandelier ~ 102 - 3*ATR(~4) = 90, ABOVE today's low of 89 -> the
+    # pre-ratchet stop (80) must rule: no exit this bar, trail to ~90 for tomorrow.
+    df = _ohlcv(last_low=89.0, last_high=101.0)
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(df))
+    assert rep.exits_submitted == []
+    t = _read(s.run.db_url)
+    assert t["status"] == "open"
+    assert t["effective_stop"] is not None and t["effective_stop"] > 80.0
+
+
+def test_exit_finalizes_from_stop_fill_when_position_already_gone(tmp_path, monkeypatch):
+    """Time-exit wants to sell, but the stop filled in the race window -> no short sell."""
+    class RaceBroker(FakeBroker):
+        def get_position(self, symbol):
+            return None  # flattened between the run-start snapshot and the re-check
+
+    s = _settings(tmp_path)
+    _seed(s.run.db_url, status="open", qty=1.5, stop_price=94.0, effective_stop=94.0,
+          target_price=200.0, entry_fill_date=date(2024, 1, 2), actual_entry=100.0,
+          risk_per_share=6.0, protective_order_id="PS1", filled_qty=1.5)
+    pos = BrokerPosition("AAPL", 1.5, 100.0, 141.0, 0.0, 94.0)
+    broker = RaceBroker(positions=[pos],
+                        orders=[_order2("PS1", "AAPL", "sell", "stop", "filled",
+                                        qty=1.5, filled_qty=1.5, fill=93.8)])
+    df = _ohlcv(last_low=95.0, last_high=101.0)  # no price exit; ~35 bars -> time exit
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(df))
+    t = _read(s.run.db_url)
+    assert t["status"] == "closed"
+    assert t["exit_price"] == 93.8
+    assert t["exit_reason"] == "stopped"
+    assert [o for o in broker.submitted if o.side == "sell"] == []
+    assert "AAPL" in rep.closed
+
+
+def test_stale_data_skips_price_exits(tmp_path, monkeypatch):
+    """Days-old bars must not trigger stop/target decisions."""
+    s = _settings(tmp_path)
+    _seed(s.run.db_url, status="open", qty=1.5, stop_price=94.0, effective_stop=94.0,
+          target_price=112.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
+    pos = BrokerPosition("AAPL", 1.5, 100.0, 141.0, 0.0, 100.0)
+    broker = FakeBroker(positions=[pos])
+    idx = pd.bdate_range(end="2024-02-09", periods=30)  # 7 business days stale
+    df = pd.DataFrame({"open": [100.0] * 30, "high": [101.0] * 30, "low": [90.0] * 30,
+                       "close": [100.0] * 30, "volume": [1_000_000] * 30}, index=idx)
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(df))
+    assert rep.exits_submitted == []  # low 90 <= stop 94, but the bar is a week old
+    assert _read(s.run.db_url)["status"] == "open"
+
+
+def test_orphan_position_adopted_with_synth_stop(tmp_path, monkeypatch):
+    """A live position with no trade row (crash before commit) is adopted + stopped."""
+    s = _settings(tmp_path)
+    pos = BrokerPosition("MSFT", 3.0, 200.0, 612.0, 12.0, 204.0)
+    broker = FakeBroker(positions=[pos])
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(_ohlcv(last_low=203.0, last_high=205.0)))
+    assert "MSFT" in rep.orphans_adopted
+    t = _read(s.run.db_url, symbol="MSFT")
+    assert t["status"] == "open"
+    assert t["qty"] == 3.0 and t["actual_entry"] == 200.0
+    assert t["entry_order_type"] == "adopted"
+    assert t["stop_price"] is not None and t["stop_price"] < 200.0
+
+
+def test_orphan_swing_buy_order_canceled(tmp_path, monkeypatch):
+    """A resting swing-* buy with no trade row would fill into an unmanaged position."""
+    s = _settings(tmp_path)
+    orphan = _order2("OB1", "NVDA", "buy", "limit", "accepted", qty=2.0,
+                     coid="swing-20240220-NVDA-entry")
+    broker = FakeBroker(orders=[orphan])
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(None))
+    assert "NVDA" in rep.orphan_orders_canceled
+    assert broker._orders["OB1"].status == "canceled"
+
+
+def test_staged_partial_fill_syncs_real_price(tmp_path, monkeypatch):
+    """The provisional theoretical partial price is replaced by the actual fill."""
+    s = _staged(tmp_path)
+    _seed(s.run.db_url, status="open", order_class="simple", qty=2.0, filled_qty=2.0,
+          stop_price=94.0, effective_stop=100.0, target_price=112.0,
+          entry_fill_date=date(2024, 2, 13), actual_entry=100.0, risk_per_share=6.0,
+          partial_done=True, partial_qty=1.0, partial_fill_price=112.0,
+          partial_fill_date=DAY, partial_order_id="P1")
+    broker = FakeBroker(
+        positions=[BrokerPosition("AAPL", 1.0, 100.0, 105.0, 5.0, 105.0)],
+        orders=[_order2("P1", "AAPL", "sell", "market", "filled",
+                        qty=1.0, filled_qty=1.0, fill=111.4)])
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                         loader=FakeLoader(_ohlcv(last_low=104.0, last_high=106.0, close=105.0)))
+    t = _read(s.run.db_url)
+    assert t["partial_fill_price"] == 111.4
+    assert t["partial_order_id"] is None
+    assert t["partial_done"]
+
+
+def test_staged_partial_dead_unfilled_rolls_back(tmp_path, monkeypatch):
+    """A scale-out that died unfilled re-arms (partial_done back to False)."""
+    s = _staged(tmp_path)
+    _seed(s.run.db_url, status="open", order_class="simple", qty=2.0, filled_qty=2.0,
+          stop_price=94.0, effective_stop=100.0, target_price=112.0,
+          entry_fill_date=date(2024, 2, 13), actual_entry=100.0, risk_per_share=6.0,
+          partial_done=True, partial_qty=1.0, partial_fill_price=112.0,
+          partial_fill_date=DAY, partial_order_id="P1")
+    broker = FakeBroker(
+        positions=[BrokerPosition("AAPL", 2.0, 100.0, 210.0, 10.0, 105.0)],
+        orders=[_order2("P1", "AAPL", "sell", "market", "expired", qty=1.0, filled_qty=0.0)])
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                         loader=FakeLoader(_ohlcv(last_low=104.0, last_high=106.0, close=105.0)))
+    t = _read(s.run.db_url)
+    assert not t["partial_done"]
+    assert t["partial_qty"] is None and t["partial_fill_price"] is None
+    assert t["partial_order_id"] is None

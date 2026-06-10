@@ -38,3 +38,25 @@ def test_conviction_clamped_to_ceiling():
         conviction_mult=3.0,
     )
     assert abs(r.risk_pct - 0.02) < 1e-9
+
+
+def test_notional_cap_clamps_low_vol_name():
+    # 1% risk with a 2% stop wants $50k (half the account); the 20% cap bounds it.
+    r = position_size(
+        equity=100_000.0, entry=100.0, stop=98.0, risk_pct=0.01, risk_pct_ceiling=0.02,
+        max_notional_pct=0.20,
+    )
+    assert r.shares == 200.0
+    assert r.notional == 20_000.0
+    assert abs(r.risk_pct - 0.004) < 1e-12  # actual risk taken, post-clamp
+    assert any("notional" in why for why in r.reasons)
+
+
+def test_notional_cap_no_op_when_under_cap():
+    r = position_size(
+        equity=100_000.0, entry=100.0, stop=90.0, risk_pct=0.01, risk_pct_ceiling=0.02,
+        max_notional_pct=0.20,
+    )
+    assert r.shares == 100.0  # $1000 risk / $10 stop
+    assert r.notional == 10_000.0
+    assert abs(r.risk_pct - 0.01) < 1e-12

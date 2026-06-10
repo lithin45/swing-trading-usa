@@ -40,9 +40,21 @@ class OHLCVCache:
             return None
 
     def put(self, symbol: str, df: pd.DataFrame | None) -> None:
+        """Merge new bars into the cached frame (never shrink deep history).
+
+        Daily runs fetch only ~400 days; a plain overwrite would truncate a
+        multi-year cache down to that window, and a later ``backtest --offline``
+        would silently cover months instead of the configured years. New bars win
+        on overlapping dates (re-fetches carry fresher adjusted prices).
+        """
         if df is None or len(df) == 0:
             return
         try:
+            old = self.get(symbol)
+            if old is not None and len(old) > 0 and old.index.min() < df.index.min():
+                keep = old[old.index < df.index.min()]
+                df = pd.concat([keep, df]).sort_index()
+                df = df[~df.index.duplicated(keep="last")]
             df.to_parquet(self._path(symbol))
         except Exception as exc:  # noqa: BLE001 - caching is best-effort
             log.warning("cache write failed for %s (%s)", symbol, exc)

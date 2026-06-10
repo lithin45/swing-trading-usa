@@ -29,10 +29,13 @@ class FinnhubNews:
     def get_news(self, symbol: str, start: date, end: date) -> list[NewsItem]:
         if not self.api_key:
             return []
-        rows = http_json(_URL, params={
-            "symbol": symbol, "from": start.isoformat(), "to": end.isoformat(),
-            "token": self.api_key,
-        })
+        # Key in the header, not the query string: exception messages embed the URL,
+        # and those get retried/logged — never give them a secret to carry.
+        rows = http_json(
+            _URL,
+            params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat()},
+            headers={"X-Finnhub-Token": self.api_key},
+        )
         items: list[NewsItem] = []
         for r in rows or []:
             ts = r.get("datetime")

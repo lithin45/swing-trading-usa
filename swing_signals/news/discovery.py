@@ -37,15 +37,17 @@ def discover_movers(settings: Settings, secrets: Secrets, *, limit: int = 20) ->
     try:
         import requests
 
+        # Key in the header (not the URL): this exception message is logged below.
         resp = requests.get(
             "https://finnhub.io/api/v1/news",
-            params={"category": "general", "token": key},
+            params={"category": "general"},
+            headers={"X-Finnhub-Token": key},
             timeout=10,
         )
         resp.raise_for_status()
         items = resp.json()
     except Exception as exc:  # noqa: BLE001 - discovery is best-effort
-        log.warning("finnhub general-news discovery failed: %s", exc)
+        log.warning("finnhub general-news discovery failed: %s", type(exc).__name__)
         return []
 
     counts: dict[str, int] = {}

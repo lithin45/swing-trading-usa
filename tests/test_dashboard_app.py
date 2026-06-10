@@ -26,11 +26,25 @@ def _isolated(tmp_path, monkeypatch):
     import streamlit as st
 
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/dash.db")
+    # Auth is fail-closed without a password; tests opt into the explicit open mode
+    # so every page body actually executes.
+    monkeypatch.setenv("SWING_DASHBOARD_ALLOW_OPEN", "1")
     for k in ("SWING_ALPACA_API_KEY", "SWING_ALPACA_SECRET_KEY", "SWING_DATABASE_URL"):
         monkeypatch.delenv(k, raising=False)
     st.cache_resource.clear()
     st.cache_data.clear()
     yield
+
+
+def test_auth_fails_closed_without_password(monkeypatch):
+    """No dashboard_password and no explicit open flag -> the page must NOT render."""
+    monkeypatch.delenv("SWING_DASHBOARD_ALLOW_OPEN", raising=False)
+    at = AppTest.from_file(str(DASH / "app.py"), default_timeout=30)
+    at.secrets["dashboard_password"] = ""  # blank == unset (and masks any local secrets.toml)
+    at.run()
+    assert not at.exception
+    assert at.error, "expected a refusing-to-serve error banner"
+    assert not at.metric, "page content rendered despite missing password"
 
 
 @pytest.mark.parametrize("page", PAGES)

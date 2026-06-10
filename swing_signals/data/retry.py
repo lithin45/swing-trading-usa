@@ -56,14 +56,32 @@ def with_retry(fn=None, *, attempts: int = 4, base: float = 1.0, cap: float = 20
     return decorator if fn is None else decorator(fn)
 
 
+def sanitize_url(url: str) -> str:
+    """Strip the query string and any /bot<token>/ path segment from a URL.
+
+    Several providers carry the API key in the query (?token=, ?apikey=) and
+    Telegram carries it in the path; exception messages with the raw URL get
+    retried/logged/printed, and on a public repo those logs are world-readable.
+    GitHub masks exact secret values, but only there — keep the logs clean at
+    the source instead of relying on platform redaction.
+    """
+    base = url.split("?", 1)[0]
+    if "/bot" in base:  # api.telegram.org/bot<TOKEN>/method
+        head, _, tail = base.partition("/bot")
+        method = tail.split("/", 1)[1] if "/" in tail else ""
+        base = f"{head}/bot***/{method}"
+    return base
+
+
 def classify_http(response: requests.Response) -> None:
     """Raise the right error type for a bad HTTP status (no-op on 2xx/3xx).
 
     429 and 5xx → transient (retry); other 4xx → permanent (fail fast).
+    The URL is sanitized: query strings carry API keys for several providers.
     """
     code = response.status_code
     if code < 400:
         return
     if code == 429 or code >= 500:
-        raise TransientDataError(f"HTTP {code} (transient) for {response.url}")
-    raise PermanentDataError(f"HTTP {code} (permanent) for {response.url}")
+        raise TransientDataError(f"HTTP {code} (transient) for {sanitize_url(response.url)}")
+    raise PermanentDataError(f"HTTP {code} (permanent) for {sanitize_url(response.url)}")

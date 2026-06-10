@@ -276,6 +276,7 @@ def generate_signals(
             equity=settings.account.equity, entry=levels.entry, stop=levels.stop,
             risk_pct=settings.account.risk_pct, risk_pct_ceiling=settings.account.risk_pct_ceiling,
             fractional=settings.account.fractional_shares, conviction_mult=conviction_mult,
+            max_notional_pct=settings.risk.max_position_notional_pct,
         )
         if size.shares <= 0:
             no_trades.append(Signal(
