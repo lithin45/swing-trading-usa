@@ -21,6 +21,7 @@ import streamlit as st  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
 
 from swing_signals.config_loader import _normalize_db_url  # noqa: E402
+from swing_signals.persistence.db import _ensure_columns  # noqa: E402
 from swing_signals.persistence.models import (  # noqa: E402
     AccountSnapshot,
     Base,
@@ -59,6 +60,7 @@ def get_engine():
         kwargs.update(pool_size=2, max_overflow=3)
     engine = create_engine(url, **kwargs)
     Base.metadata.create_all(engine)  # idempotent; no-op once the bot has created the tables
+    _ensure_columns(engine)  # add staged-exit columns if this DB predates them (race-safe)
     return engine
 
 
