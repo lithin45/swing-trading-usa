@@ -22,3 +22,8 @@ class BacktestCfg(BaseModel):
     warmup_bars: int = Field(default=210, gt=0)   # bars before first signal allowed
     equity_start: float = Field(default=0.0, ge=0)
     # 0 means "use settings.account.equity"
+    # Replay the live account-level loss halts (risk.daily/weekly/monthly_loss_halt,
+    # drawdown derisk/hard-halt) in the simulation. Default ON: without it the
+    # backtest takes entries the live gates would refuse, overstating returns and
+    # cadence (audit P1 #4). Turn off only to reproduce pre-2026-06 numbers.
+    replay_loss_halts: bool = True

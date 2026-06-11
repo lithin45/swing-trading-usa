@@ -50,6 +50,13 @@ ceiling is *proven*, not assumed (2018 replay: max 7/month, 0 months over cap).
 positions before one (`earnings_exit`) — a 3-ATR stop cannot contain an earnings gap. Without a
 key the run proceeds unscreened and warns loudly.
 
+**Validation discipline:** `docs/validation/` holds the trial ledger (every config evaluation
+ever looked at; feeds the Deflated Sharpe's N), ±10% sensitivity sweeps with PSR/DSR + CSCV PBO
+(`scripts/sweep_sensitivity.py`), and the go/no-go checklist. The backtester replays the live
+loss-halt/drawdown gates (`backtest.replay_loss_halts`, default on) so reported returns and
+cadence match what the live gates would have allowed. A signal run while the NYSE session is
+still open is refused (partial-bar guard; override with `--allow-partial-bar`).
+
 **Principles:** modular and config-driven (add/remove a factor or change a weight in
 `config/settings.yaml`, never in code); transparent (every signal records which factors fired and
 why); fail safe and loud (missing/stale data → skip the stock and say so, never emit a confident

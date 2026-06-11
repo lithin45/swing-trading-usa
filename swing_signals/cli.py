@@ -88,6 +88,9 @@ def _add_run_flags(p: argparse.ArgumentParser) -> None:
                    help="Print alerts instead of sending; no-op write.")
     p.add_argument("--offline", action="store_true",
                    help="Use cached data only; never hit the network.")
+    p.add_argument("--allow-partial-bar", action="store_true",
+                   help="Override the bar-finality guard: allow a signal run while the "
+                        "NYSE session is still open (today's bar is incomplete).")
     p.add_argument("--config", default=None, metavar="PATH")
 
 
@@ -163,7 +166,8 @@ def main(argv: list[str] | None = None) -> int:
     dry_run = args.dry_run or settings.alerts.dry_run_default
     healthcheck_url = None if dry_run else secrets.healthcheck_url
     try:
-        rc = run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline)
+        rc = run(settings=settings, secrets=secrets, dry_run=dry_run, offline=args.offline,
+                 allow_partial_bar=args.allow_partial_bar)
     except Exception as exc:  # noqa: BLE001 - fail loud: surface + alert, never silent
         print(f"run failed: {exc}", file=sys.stderr)
         if not dry_run:

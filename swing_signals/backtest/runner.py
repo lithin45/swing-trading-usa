@@ -96,6 +96,8 @@ class BacktestResult:
     n_unfilled: int = 0         # signals whose entry never filled (limit aged out)
     n_capped: int = 0           # signals skipped by max-positions / heat / cash caps
     n_budget_deferred: int = 0  # signals deferred by the monthly entry budget
+    n_halted_days: int = 0      # days the replayed loss-halt gates blocked new entries
+    n_halt_blocked: int = 0     # actionable signals those halts refused
 
 
 class BacktestRunner:
@@ -195,6 +197,8 @@ class BacktestRunner:
         n_unfilled = 0
         n_capped = 0
         n_budget_deferred = 0
+        n_halted_days = 0
+        n_halt_blocked = 0
         risk_cfg = self.settings.risk
         entry_type, max_pending, mkt_fallback = self._entry_model()
         # Budget mirror (mandate §4): the same monthly ceiling + cooldown the live
@@ -261,8 +265,22 @@ class BacktestRunner:
             )
 
             # 4. Submit new entries under the LIVE portfolio constraints. Pending
-            #    orders count toward the caps exactly as live active_trades do.
+            #    orders count toward the caps exactly as live active_trades do; the
+            #    live loss-halt/drawdown gates are replayed first (audit P1 #4) —
+            #    a halted live account would refuse these same entries.
+            halt_new, risk_mult = False, 1.0
+            if self.bt_cfg.replay_loss_halts:
+                halt_new, risk_mult, halt_why = halt_state(
+                    risk_cfg, equity_start, equity_curve, trading_days[:-1], signal_bar
+                )
+                if halt_new and result.actionable:
+                    n_halt_blocked += len(result.actionable)
+                if halt_new:
+                    n_halted_days += 1
+                    log.debug("%s: new entries halted (%s)", signal_bar, halt_why)
             for sig in result.actionable:
+                if halt_new:
+                    continue
                 if sig.ticker in positions or sig.ticker in pending:
                     continue
                 if len(positions) + len(pending) >= risk_cfg.max_positions:
@@ -272,12 +290,12 @@ class BacktestRunner:
                     sum(p.risk_frac for p in positions.values())
                     + sum(p.risk_frac for p in pending.values())
                 )
-                risk_frac = sig.suggested_risk_pct or 0.0
+                risk_frac = (sig.suggested_risk_pct or 0.0) * risk_mult
                 if open_heat + risk_frac > risk_cfg.portfolio_heat_cap + 1e-9:
                     n_capped += 1
                     continue
                 limit = self._limit_price(sig)
-                shares = sig.suggested_shares or 0.0
+                shares = (sig.suggested_shares or 0.0) * risk_mult
                 if limit is None or limit <= 0 or shares <= 0:
                     continue
                 pending[sig.ticker] = _PendingEntry(
@@ -335,6 +353,8 @@ class BacktestRunner:
             n_unfilled=n_unfilled,
             n_capped=n_capped,
             n_budget_deferred=n_budget_deferred,
+            n_halted_days=n_halted_days,
+            n_halt_blocked=n_halt_blocked,
         )
 
     def _entry_model(self) -> tuple[str, int, bool]:
@@ -632,6 +652,64 @@ class BacktestRunner:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+def halt_state(
+    risk_cfg,
+    equity_start: float,
+    equity_curve: list[float],
+    curve_days: list[date],
+    today: date,
+) -> tuple[bool, float, str]:
+    """Replay the live loss-halt/drawdown gates from the simulated equity curve.
+
+    Mirrors ``broker/gates.py``: losses are measured from the last equity value
+    BEFORE each period started (yesterday / ISO-week start / month start), and
+    drawdown from the running peak — all using yesterday's close (the live gate
+    runs pre-trade off the latest snapshot, never today's unknown close).
+
+    Returns ``(halt_new_entries, risk_multiplier, reason)``.
+    """
+    if not equity_curve:
+        return False, 1.0, ""
+    cur = equity_curve[-1]
+    peak = max(equity_start, *equity_curve)
+
+    def _loss_vs(baseline: float) -> float:
+        return (cur - baseline) / baseline if baseline > 0 else 0.0
+
+    # Daily: vs the close before yesterday's session.
+    daily_base = equity_curve[-2] if len(equity_curve) >= 2 else equity_start
+    if _loss_vs(daily_base) <= -risk_cfg.daily_loss_halt:
+        return True, 0.0, "daily_loss_halt"
+
+    # Weekly / monthly: vs the last close before the current period began.
+    week_key = today.isocalendar()[:2]
+    month_key = (today.year, today.month)
+    week_base: float | None = None
+    month_base: float | None = None
+    for i in range(len(curve_days) - 1, -1, -1):
+        d = curve_days[i]
+        if week_base is None and d.isocalendar()[:2] != week_key:
+            week_base = equity_curve[i]
+        if month_base is None and (d.year, d.month) != month_key:
+            month_base = equity_curve[i]
+        if week_base is not None and month_base is not None:
+            break
+    if _loss_vs(week_base if week_base is not None else equity_start) <= -risk_cfg.weekly_loss_halt:
+        return True, 0.0, "weekly_loss_halt"
+    if (
+        _loss_vs(month_base if month_base is not None else equity_start)
+        <= -risk_cfg.monthly_loss_halt
+    ):
+        return True, 0.0, "monthly_loss_halt"
+
+    dd = (cur - peak) / peak if peak > 0 else 0.0
+    if dd <= -risk_cfg.drawdown_hard_halt:
+        return True, 0.0, "drawdown_hard_halt"
+    if dd <= -risk_cfg.drawdown_derisk:
+        return False, 0.5, "drawdown_derisk"
+    return False, 1.0, ""
+
 
 def _clean_series(s: pd.Series | None) -> pd.Series | None:
     """Drop NaNs and normalize the index to Timestamps, sorted ascending."""
