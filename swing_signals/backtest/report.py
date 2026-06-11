@@ -66,6 +66,11 @@ def format_backtest_report(
         f"{result.n_capped} skipped by position/heat caps, "
         f"{result.n_budget_deferred} deferred by the monthly budget"
     )
+    if result.n_halted_days:
+        lines.append(
+            f"Loss halts:  replayed live gates blocked new entries on "
+            f"{result.n_halted_days} day(s) ({result.n_halt_blocked} signals refused)"
+        )
     lines.append("")
 
     lines.append("METRICS")

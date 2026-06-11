@@ -35,6 +35,29 @@ def configure_logging(level: str) -> None:
     )
 
 
+def _now_eastern():
+    """Current US/Eastern time — separate so tests can monkeypatch the clock."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def session_still_open(today: date) -> bool:
+    """True when a run targets TODAY while the NYSE session is still trading.
+
+    Today's bar is then partial — indicators, ATR levels, and the regime gate
+    would all be computed on an incomplete candle (audit P1 #2: the 21:30 UTC
+    schedule is safe by accident only; a manual midday run is not). A past
+    ``today`` is always final; early-close days close at 13:00 ET.
+    """
+    now_et = _now_eastern()
+    if now_et.date() != today or not is_trading_day(today):
+        return False
+    close_hour = 13 if is_early_close(today) else 16
+    return now_et.hour < close_hour
+
+
 def _persist(settings: Settings, today: date, result, secrets: Secrets | None = None) -> None:
     """Best-effort write of the run + its signals/rejections to the DB (never fails the run)."""
     try:
@@ -157,6 +180,7 @@ def run(
     offline: bool = False,
     today: date | None = None,
     loader: DataLoader | None = None,
+    allow_partial_bar: bool = False,
 ) -> int:
     """Execute one daily run. Returns a process exit code (0 = success/no-op)."""
     settings = settings if settings is not None else load_settings()
@@ -175,6 +199,19 @@ def run(
         return 0
     if is_early_close(today):
         log.info("%s is an NYSE half-day (early close)", today)
+
+    # Step 0b — bar-finality guard: a mid-session run computes signals on a PARTIAL
+    # bar (wrong ATR, wrong close, wrong regime). Refuse unless explicitly overridden.
+    if session_still_open(today):
+        if not allow_partial_bar:
+            log.error(
+                "NYSE session is still open — today's bar is incomplete and signals "
+                "computed on it are unreliable. Re-run after the 16:00 ET close, or "
+                "pass --allow-partial-bar to override."
+            )
+            return 2
+        log.warning("running on a PARTIAL intraday bar (--allow-partial-bar) — "
+                    "levels and scores use an incomplete candle")
 
     # Stage 2 — data layer.
     loader = loader if loader is not None else DataLoader(settings, secrets)
