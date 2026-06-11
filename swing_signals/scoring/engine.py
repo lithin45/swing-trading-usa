@@ -27,7 +27,14 @@ if TYPE_CHECKING:
     from ..market.base import MarketState
     from .budget import BudgetState
 
-_TIER_MULT = {"High": 1.0, "Medium": 0.66, "Low": 0.33, "None": 0.0}
+def _tier_mult(tier: str, scoring_cfg) -> float:
+    """Conviction-tier size multiplier, read from config (None tier never sizes)."""
+    return {
+        "High": scoring_cfg.tier_mult_high,
+        "Medium": scoring_cfg.tier_mult_medium,
+        "Low": scoring_cfg.tier_mult_low,
+        "None": 0.0,
+    }[tier]
 
 
 def composite_score(
@@ -335,7 +342,9 @@ def generate_signals(
                 scalar_min=settings.sizing.vol_scalar_min,
                 scalar_max=settings.sizing.vol_scalar_max,
             )
-        conviction_mult = _TIER_MULT[tier] * regime.multiplier * macro_multiplier * vscalar
+        conviction_mult = (
+            _tier_mult(tier, settings.scoring) * regime.multiplier * macro_multiplier * vscalar
+        )
         size = position_size(
             equity=settings.account.equity, entry=levels.entry, stop=levels.stop,
             risk_pct=settings.account.risk_pct, risk_pct_ceiling=settings.account.risk_pct_ceiling,

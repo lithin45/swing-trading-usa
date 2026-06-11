@@ -86,6 +86,14 @@ class ScoringCfg(StrictModel):
     # (0 = disabled). Momentum ranking favors the most extended names; this bounds
     # buying blow-off tops that mean-revert before reaching the 2R target.
     max_extension_atr: float = Field(default=0.0, ge=0)
+    # Conviction-tier SIZE multipliers (2026-06-11, configurable). The historical
+    # 1.0/0.66/0.33 stack double-charged conviction: the composite threshold +
+    # budget ranking already select for it, then the size multiplier shrank the
+    # fill again — one leg of the ~0.3% effective risk vs 1% nominal finding.
+    # Defaults preserve the original behavior.
+    tier_mult_high: float = Field(default=1.0, gt=0, le=1)
+    tier_mult_medium: float = Field(default=0.66, gt=0, le=1)
+    tier_mult_low: float = Field(default=0.33, gt=0, le=1)
 
     @model_validator(mode="after")
     def _tiers_ordered(self) -> ScoringCfg:
@@ -130,6 +138,16 @@ class RiskCfg(StrictModel):
     monthly_loss_halt: float = Field(gt=0, le=1)
     drawdown_derisk: float = Field(gt=0, le=1)
     drawdown_hard_halt: float = Field(gt=0, le=1)
+    # Drawdown-brake recovery (2026-06-11). The original hard halt was an ABSORBING
+    # state: once dd >= hard_halt, no new entries are allowed, so equity can never
+    # climb back — 2017-19 replay spent 306/752 days dead and missed all of 2019.
+    # peak_lookback bounds the high-water mark to a trailing window (0 = all-time,
+    # the absorbing original); halt_resume_days re-opens entries at
+    # halt_resume_risk_mult size after that many bars of continuous halt (0 = never
+    # resume). Defaults preserve the original behavior for existing configs.
+    drawdown_peak_lookback: int = Field(default=0, ge=0)        # trading bars; 0 = all-time
+    halt_resume_days: int = Field(default=0, ge=0)              # 0 = absorbing halt
+    halt_resume_risk_mult: float = Field(default=0.25, gt=0, le=1)
     # Concentration caps. Risk-at-stop sizing alone gives the LARGEST dollar exposure
     # to the LOWEST-volatility names (notional/equity = risk% / stop%), so a calm
     # mega-cap could absorb half the account; the real tail risk there is a gap

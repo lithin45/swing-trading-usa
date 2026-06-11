@@ -96,12 +96,21 @@ class DataLoader:
                 return cached
             raise PermanentDataError(f"offline: no cached data for {symbol}")
 
-        # 3) try providers in order; cache each success. A degenerate response —
-        # a handful of bars against a multi-month request (a throttled yfinance
-        # has returned 1-bar frames) — counts as a failure: the next provider (or
-        # the stale-cache fallback) beats silently acting on a gutted frame.
+        # 3) try providers in order; cache each success. Two response-quality guards:
+        # (a) degenerate: a handful of bars against a multi-month request (a
+        #     throttled yfinance has returned 1-bar frames);
+        # (b) START-TRUNCATED: a provider silently serving less history than asked
+        #     (Alpaca's free IEX feed caps at ~6 years FROM TODAY regardless of the
+        #     requested start — discovered 2026-06-10 when it carved a 210-day hole
+        #     into the union-merge cache and the backtest traded zombie signals).
+        #     A truncated frame is kept as a fallback candidate, but deeper-history
+        #     providers get a chance first; the deepest response wins. A genuinely
+        #     young listing (IPO after `start`) yields the same start date from
+        #     every provider, so it is served normally rather than rejected.
         errors: list[str] = []
         req_days = (date.fromisoformat(end[:10]) - date.fromisoformat(start[:10])).days
+        start_ts = pd.Timestamp(start[:10])
+        best_partial: pd.DataFrame | None = None
         for provider in self.providers:
             try:
                 df = provider.get_ohlcv(symbol, start, end)
@@ -109,11 +118,30 @@ class DataLoader:
                     raise TransientDataError(
                         f"degenerate response: {len(df)} bars for a {req_days}-day request"
                     )
+                if (
+                    df is not None and len(df) > 0
+                    and (df.index[0] - start_ts).days > 10  # > ~7 trading days late
+                ):
+                    if best_partial is None or df.index[0] < best_partial.index[0]:
+                        best_partial = df
+                    log.info(
+                        "provider %s start-truncated %s: asked %s, got %s — trying deeper providers",
+                        provider.name, symbol, start[:10], df.index[0].date(),
+                    )
+                    continue
                 self.cache.put(symbol, df)
                 return df
             except Exception as exc:  # noqa: BLE001 - try the next provider
                 errors.append(f"{provider.name}: {exc}")
                 log.warning("provider %s failed for %s: %s", provider.name, symbol, exc)
+
+        if best_partial is not None:  # deepest truncated response beats nothing
+            log.warning(
+                "all providers start-truncated for %s; using deepest (starts %s)",
+                symbol, best_partial.index[0].date(),
+            )
+            self.cache.put(symbol, best_partial)
+            return best_partial
 
         # 4) last resort: stale cache beats no data (the quality gate will flag it).
         cached = self.cache.get(symbol)

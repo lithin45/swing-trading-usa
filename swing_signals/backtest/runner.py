@@ -511,12 +511,28 @@ class BacktestRunner:
             )
             if sd.ohlcv is None or len(sd.ohlcv) < self.bt_cfg.warmup_bars:
                 sd.issues.append(f"{ticker}: insufficient bars at {asof}")
+            elif self._stale_at(sd.ohlcv, asof):
+                # Mirror the LIVE staleness gate (data.max_staleness_days): a symbol
+                # whose bars stop (delisting, cache hole) must be skipped, exactly as
+                # the live loader skips it. Without this, a frame frozen at a
+                # momentum high keeps re-signaling forever — zombie signals burned
+                # 5 months of 2020 budget before this guard existed.
+                last = sd.ohlcv.index[-1].date()
+                sd.issues.append(f"{ticker}: stale at {asof} (last bar {last})")
             else:
                 panel = self._panel_for(ticker, df).loc[:ts]
                 if len(panel) > 0:
                     sd.indicators = panel.iloc[-1].to_dict()
             result[ticker] = sd
         return result
+
+    def _stale_at(self, sliced: pd.DataFrame, asof: date) -> bool:
+        """True when the last bar is older than the live staleness tolerance."""
+        import numpy as np
+
+        last = sliced.index[-1]
+        last_date = last.date() if hasattr(last, "date") else date.fromisoformat(str(last)[:10])
+        return int(np.busday_count(last_date, asof)) > self.settings.data.max_staleness_days
 
     def _panel_for(self, ticker: str, df: pd.DataFrame) -> pd.DataFrame:
         """Indicator panel over a symbol's full history, computed once and cached."""
@@ -672,7 +688,6 @@ def halt_state(
     if not equity_curve:
         return False, 1.0, ""
     cur = equity_curve[-1]
-    peak = max(equity_start, *equity_curve)
 
     def _loss_vs(baseline: float) -> float:
         return (cur - baseline) / baseline if baseline > 0 else 0.0
@@ -703,12 +718,46 @@ def halt_state(
     ):
         return True, 0.0, "monthly_loss_halt"
 
-    dd = (cur - peak) / peak if peak > 0 else 0.0
+    dd = _trailing_dd(equity_curve, equity_start, len(equity_curve) - 1, risk_cfg)
     if dd <= -risk_cfg.drawdown_hard_halt:
+        # Resume ramp (non-absorbing brake): after `halt_resume_days` consecutive
+        # bars at/under the hard-halt line, re-open entries at a reduced size
+        # instead of staying dead forever. resume_days == 0 keeps the original
+        # absorbing behavior. We only need "has the breach persisted >= resume
+        # days", so the walk-back is bounded by resume_days.
+        resume = getattr(risk_cfg, "halt_resume_days", 0)
+        if resume > 0:
+            i, run_len = len(equity_curve) - 1, 0
+            while i >= 0 and run_len < resume:
+                if _trailing_dd(equity_curve, equity_start, i, risk_cfg) > -risk_cfg.drawdown_hard_halt:
+                    break
+                run_len += 1
+                i -= 1
+            if run_len >= resume:
+                return False, risk_cfg.halt_resume_risk_mult, "drawdown_halt_resumed"
         return True, 0.0, "drawdown_hard_halt"
     if dd <= -risk_cfg.drawdown_derisk:
         return False, 0.5, "drawdown_derisk"
     return False, 1.0, ""
+
+
+def _trailing_dd(
+    equity_curve: list[float], equity_start: float, i: int, risk_cfg
+) -> float:
+    """Drawdown of ``equity_curve[i]`` vs its (possibly trailing) high-water mark.
+
+    ``drawdown_peak_lookback`` bounds the peak to the last N bars ending at ``i``
+    so an ancient high cannot anchor the halt forever; 0 = all-time peak (the
+    original behavior). ``equity_start`` seeds the peak only while the window
+    still reaches back to the start of the simulation.
+    """
+    lookback = getattr(risk_cfg, "drawdown_peak_lookback", 0)
+    lo = 0 if lookback <= 0 else max(0, i + 1 - lookback)
+    window_peak = max(equity_curve[lo:i + 1])
+    if lo == 0:
+        window_peak = max(equity_start, window_peak)
+    cur = equity_curve[i]
+    return (cur - window_peak) / window_peak if window_peak > 0 else 0.0
 
 
 def _clean_series(s: pd.Series | None) -> pd.Series | None:
