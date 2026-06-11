@@ -89,11 +89,24 @@ class DataLoader:
             if fresh is not None:
                 return fresh
 
-        # 2) offline mode: cache only.
+        # 2) offline mode: cache only — TRIMMED to the requested range. The cache
+        # holds each symbol's full union of every range ever fetched (13y+ after
+        # the 2026-06 refill); returning it whole made every offline backtest
+        # carry ~3300-bar frames per symbol (memory + per-bar slice cost), which
+        # is how three concurrent matrix runs swapped a 16GB machine to a 20-hour
+        # standstill. Honor the caller's [start, end] like the providers do.
         if offline:
             cached = self.cache.get(symbol)
             if cached is not None:
-                return cached
+                trimmed = cached[
+                    (cached.index >= pd.Timestamp(start[:10]))
+                    & (cached.index <= pd.Timestamp(end[:10]))
+                ]
+                if len(trimmed) > 0:
+                    return trimmed
+                raise PermanentDataError(
+                    f"offline: cached data for {symbol} has no bars in [{start}, {end}]"
+                )
             raise PermanentDataError(f"offline: no cached data for {symbol}")
 
         # 3) try providers in order; cache each success. Two response-quality guards:

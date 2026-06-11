@@ -136,3 +136,21 @@ def test_symbol_within_staleness_window_still_ok():
     # 2 business days later: inside max_staleness_days (4) -> still tradable.
     data = runner._build_symbol_data(date(2020, 2, 14))
     assert data["FROZEN"].ok
+
+
+def test_offline_read_trims_to_requested_range(loader):
+    full = _df("2013-01-01", "2026-06-01")
+    loader.cache.put("AAA", full)
+    df = loader.get_ohlcv("AAA", "2020-01-01", "2021-12-31", offline=True)
+    assert df.index[0] >= pd.Timestamp("2020-01-01")
+    assert df.index[-1] <= pd.Timestamp("2021-12-31")
+    assert len(df) < len(full) / 2
+
+
+def test_offline_read_empty_range_raises(loader):
+    import pytest as _pytest
+
+    from swing_signals.data.retry import PermanentDataError
+    loader.cache.put("AAA", _df("2013-01-01", "2014-01-01"))
+    with _pytest.raises(PermanentDataError):
+        loader.get_ohlcv("AAA", "2020-01-01", "2021-12-31", offline=True)

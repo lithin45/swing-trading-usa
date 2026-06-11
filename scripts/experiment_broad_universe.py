@@ -37,7 +37,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from swing_signals.backtest.config import BacktestCfg
 from swing_signals.backtest.metrics import Trade
+from swing_signals.backtest.overfitting import sharpe_per_period
 from swing_signals.backtest.runner import BacktestRunner
+from swing_signals.backtest.trials import Trial, append_trial
 from swing_signals.config_loader import load_secrets, load_settings
 from swing_signals.data.loader import DataLoader
 from swing_signals.factors import f08_momentum as f08
@@ -98,6 +100,8 @@ def main() -> int:
     ap.add_argument("--dump-dir", default="/tmp/bt_experiments")
     ap.add_argument("--max-workers", type=int, default=None,
                     help="fetch parallelism (lower it for yfinance-heavy deep-past runs)")
+    ap.add_argument("--ledger-round", default=None,
+                    help="append every run to the trial ledger with this round tag (e.g. r3)")
     args = ap.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
     names = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -179,6 +183,25 @@ def main() -> int:
         rows.append((name, m["n_trades"], m["win_rate"], m["expectancy"],
                      m["profit_factor"], m["cagr"], m["max_drawdown"], m["sharpe"],
                      res.n_unfilled, res.n_capped))
+        if args.ledger_round:
+            eq = [bt_cfg.equity_start, *res.equity_curve]
+            rets = [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq))]
+            try:
+                append_trial(Trial(
+                    id=f"{date.today()}-{args.ledger_round}-{name}-{start}-{end}",
+                    date=str(date.today()), window=f"{start}..{end}",
+                    universe="sp500-pit-union", config=f"{args.ledger_round}: {name}",
+                    purpose="selection", source="scripts/experiment_broad_universe.py",
+                    n_trades=m["n_trades"], expectancy_r=m["expectancy"],
+                    profit_factor=(m["profit_factor"]
+                                   if isinstance(m["profit_factor"], (int, float)) else None),
+                    win_rate=m["win_rate"], sharpe_daily=round(sharpe_per_period(rets), 6),
+                    max_drawdown=m["max_drawdown"], cagr=m["cagr"],
+                    notes=f"halt replay ON; unfilled={res.n_unfilled} capped={res.n_capped} "
+                          f"halted_d={res.n_halted_days}",
+                ))
+            except ValueError:
+                print(f"  (ledger row for {name} already present)", flush=True)
         with (dump_dir / f"trades_{name}_{start}_{end}.csv").open("w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=[f.name for f in fields(Trade)])
             w.writeheader()
@@ -244,6 +267,54 @@ def _mut_old_base(s):
 
 
 VARIANTS["old_base"] = _mut_old_base
+
+
+# --- Round 3 (2026-06-10 overnight, pre-registered): deployment mechanics, not
+# signal patterns. Diagnostics on 2020-21 (ledger ids 2026-06-10-diag-*) showed the
+# per-trade edge survives every variant of the entry/budget question while CAGR
+# moves 10-30x — the strategy's compounding dies in execution mechanics:
+# zombie-free fills, absorbing halts, the 5-multiplier size shrink stack, and
+# right-tail truncation at 20 bars / 2R. One mutation each; selection windows
+# 2015-16 / 2020-21 / 2022-24; survivors combine; 2017-19 + 2025-26 stay untouched
+# for validation.
+
+
+def _mut_market(s):
+    s.broker.entry_order_type = "market"  # signal close -> next-open market entry
+    return s
+
+
+def _mut_brake(s):
+    # Non-absorbing drawdown brake: trailing 1y high-water mark; resume at 0.25x
+    # after 10 halted bars (live gates.py + backtest halt_state share the logic).
+    s.risk.drawdown_peak_lookback = 252
+    s.risk.halt_resume_days = 10
+    s.risk.halt_resume_risk_mult = 0.25
+    return s
+
+
+def _mut_tier_flat(s):
+    # Stop double-charging conviction: threshold+ranking already select for it.
+    # Only High/Medium ever trade (tier_low 60 < composite_min 70).
+    s.scoring.tier_mult_medium = 1.0
+    return s
+
+
+def _mut_hold40(s):
+    s.broker.max_hold_bars = 40  # bt_cfg reads broker.max_hold_bars
+    return s
+
+
+def _mut_staged_v2(s):
+    s.exits.mode = "staged"  # partial @2R + breakeven + chandelier trail (3-ATR-stop era retest)
+    return s
+
+
+VARIANTS["market"] = _mut_market
+VARIANTS["brake"] = _mut_brake
+VARIANTS["tier_flat"] = _mut_tier_flat
+VARIANTS["hold40"] = _mut_hold40
+VARIANTS["staged_v2"] = _mut_staged_v2
 
 
 if __name__ == "__main__":
