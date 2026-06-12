@@ -84,8 +84,9 @@ def evaluate_gates(
         resumed = False
         if risk.halt_resume_days > 0:
             i, run_len = len(equities) - 1, 0
+            lookback = risk.drawdown_peak_lookback
             while i >= 0 and run_len < risk.halt_resume_days:
-                if _trailing_dd_at(equities, i, risk.drawdown_peak_lookback) < risk.drawdown_hard_halt:
+                if _trailing_dd_at(equities, i, lookback) < risk.drawdown_hard_halt:
                     break
                 run_len += 1
                 i -= 1

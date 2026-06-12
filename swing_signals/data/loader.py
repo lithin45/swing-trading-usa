@@ -154,7 +154,7 @@ class DataLoader:
                     if best_partial is None or df.index[0] < best_partial.index[0]:
                         best_partial = df
                     log.info(
-                        "provider %s start-truncated %s: asked %s, got %s — trying deeper providers",
+                        "provider %s start-truncated %s: asked %s, got %s — trying deeper",
                         provider.name, symbol, start[:10], df.index[0].date(),
                     )
                     continue
