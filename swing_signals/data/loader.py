@@ -59,6 +59,14 @@ class DataLoader:
                     providers.append(tp)
                 else:
                     log.info("tiingo provider disabled (no SWING_TIINGO_API_KEY)")
+            elif name == "massive":
+                from .massive_provider import MassiveProvider
+
+                mp = MassiveProvider(api_key=_reveal(self.secrets.massive_api_key))
+                if mp.available:
+                    providers.append(mp)
+                else:
+                    log.info("massive provider disabled (no SWING_MASSIVE_API_KEY)")
             elif name == "stooq":
                 sp = StooqProvider(api_key=_reveal(self.secrets.stooq_api_key))
                 if sp.available:

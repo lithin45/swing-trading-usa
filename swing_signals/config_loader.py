@@ -349,6 +349,7 @@ class Secrets(BaseSettings):
     finnhub_api_key: SecretStr | None = None
     stooq_api_key: SecretStr | None = None
     tiingo_api_key: SecretStr | None = None
+    massive_api_key: SecretStr | None = None
     sec_edgar_user_agent: str | None = None
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None

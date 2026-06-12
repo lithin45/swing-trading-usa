@@ -147,10 +147,16 @@ universe:
   max_llm_candidates: 30            # hard cap on names that reach the (costly) Claude news factor
 
 data:
-  provider_order: [alpaca, yfinance, tiingo, stooq] # first that succeeds wins; alpaca/tiingo/stooq
-                                    # need keys. tiingo sits BEHIND the primaries (free tier caps
-                                    # unique symbols/month) but covers many DELISTED tickers —
-                                    # the only free dent in the survivorship residual.
+  provider_order: [alpaca, yfinance, tiingo, massive, stooq]
+                                    # First that succeeds wins; all but yfinance need keys.
+                                    # tiingo: BEHIND the primaries (free tier caps unique
+                                    #   symbols/month) but covers many DELISTED tickers — the
+                                    #   only free dent in the survivorship residual.
+                                    # massive (ex-Polygon): LAST-RESORT live fallback — free
+                                    #   tier = 2y window / 5 req/min, and its "adjusted" bars
+                                    #   are split-only (no dividend adjustment), so it must
+                                    #   never feed long backtest history (the 2y 403 enforces
+                                    #   this structurally).
   cache_dir: .cache
   lookback_days: 400                # enough for 200-DMA + ATR warmup
   max_staleness_days: 4             # data older than this → skip the stock (fail-loud)
