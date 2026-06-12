@@ -176,21 +176,46 @@ def test_open_stop_exit(tmp_path, monkeypatch):
     assert any(o.side == "sell" for o in broker.submitted)
 
 
-def test_chandelier_ratchets_and_protects(tmp_path, monkeypatch):
+def test_legacy_stop_holds_when_trail_disabled(tmp_path, monkeypatch):
+    """exits.trail_legacy_stop=false is the VALIDATED combo: the stop never moves.
+
+    The protective order must rest at the FIXED stop no matter how far price runs.
+    """
     s = _settings(tmp_path)
+    s.exits.trail_legacy_stop = False
     _seed(s.run.db_url, status="open", qty=1.5, stop_price=94.0, effective_stop=94.0,
           target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
     pos = BrokerPosition("AAPL", 1.5, 100.0, 174.0, 24.0, 116.0)
     broker = FakeBroker(positions=[pos])
-    # price has run up to ~116; chandelier should lift the stop well above 94
+    # price has run up to ~116; a chandelier would lift the stop well above 94 —
+    # the validated combo demands it stays exactly at 94
     df = _ohlcv(last_low=115.0, last_high=117.0, hi=118.0, lo=114.0, close=116.0)
     rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
                                loader=FakeLoader(df))
     t = _read(s.run.db_url)
     assert t["status"] == "open"  # not exited
+    assert t["effective_stop"] == 94.0  # HOLDS — no trail
+    assert rep.protective_placed == ["AAPL"]
+    stops = [o for o in broker.submitted if o.type == "stop" and o.side == "sell"]
+    assert stops and stops[-1].stop_price == 94.0
+
+
+def test_legacy_stop_trails_when_flag_enabled(tmp_path, monkeypatch):
+    """exits.trail_legacy_stop=true (owner variant): the chandelier ratchets the
+    stop up for the next session, and the protective order follows it."""
+    s = _settings(tmp_path)
+    s.exits.trail_legacy_stop = True
+    _seed(s.run.db_url, status="open", qty=1.5, stop_price=94.0, effective_stop=94.0,
+          target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
+    pos = BrokerPosition("AAPL", 1.5, 100.0, 174.0, 24.0, 116.0)
+    broker = FakeBroker(positions=[pos])
+    df = _ohlcv(last_low=115.0, last_high=117.0, hi=118.0, lo=114.0, close=116.0)
+    rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
+                               loader=FakeLoader(df))
+    t = _read(s.run.db_url)
+    assert t["status"] == "open"
     assert t["effective_stop"] > 94.0  # ratcheted up
     assert rep.protective_placed == ["AAPL"]
-    assert any(o.type == "stop" and o.side == "sell" for o in broker.submitted)
 
 
 def test_time_exit(tmp_path, monkeypatch):
@@ -403,7 +428,12 @@ def test_market_fallback_fill_reanchors_stop_and_target(tmp_path, monkeypatch):
 
 
 def test_protective_restop_same_day_uses_fresh_coid(tmp_path, monkeypatch):
-    """A same-day re-placement must not reuse the canceled stop's client_order_id."""
+    """A same-day re-placement must not reuse the canceled stop's client_order_id.
+
+    Legacy no longer trails, so the re-place trigger here is an externally moved
+    effective stop (the DB row updated between runs) — the coid-freshness
+    mechanism under test is unchanged.
+    """
     s = _settings(tmp_path)
     _seed(s.run.db_url, status="open", qty=1.5, stop_price=80.0, effective_stop=80.0,
           target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
@@ -411,7 +441,9 @@ def test_protective_restop_same_day_uses_fresh_coid(tmp_path, monkeypatch):
     broker = FakeBroker(positions=[pos])
     reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
                          loader=FakeLoader(_ohlcv(last_low=99.0, last_high=101.0)))
-    # later the same day: tighter, higher bars -> the chandelier ratchets -> re-place
+    # later the same day: the stop was moved (e.g. manual tighten) -> re-place
+    _seed(s.run.db_url, status="open", qty=1.5, stop_price=80.0, effective_stop=90.0,
+          target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
     df2 = _ohlcv(last_low=110.0, last_high=112.0, hi=112.0, lo=109.0, close=111.0)
     reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
                          loader=FakeLoader(df2))
@@ -421,22 +453,24 @@ def test_protective_restop_same_day_uses_fresh_coid(tmp_path, monkeypatch):
     assert broker._orders[stops[0].id].status == "canceled"
 
 
-def test_exit_decision_uses_prior_stop_not_same_bar_ratchet(tmp_path, monkeypatch):
-    """Today's ratcheted trail may not claim today's low (mirrors backtest shift(1))."""
+def test_exit_decision_uses_prior_stop_and_legacy_never_ratchets(tmp_path, monkeypatch):
+    """The exit decision tests the stop as it stood BEFORE this bar — and in legacy
+    mode the stop also stays exactly where it was afterwards (no trail at all)."""
     s = _settings(tmp_path)
     _seed(s.run.db_url, status="open", qty=1.5, stop_price=80.0, effective_stop=80.0,
           target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0)
     pos = BrokerPosition("AAPL", 1.5, 100.0, 150.0, 0.0, 100.0)
     broker = FakeBroker(positions=[pos])
-    # Tight range: chandelier ~ 102 - 3*ATR(~4) = 90, ABOVE today's low of 89 -> the
-    # pre-ratchet stop (80) must rule: no exit this bar, trail to ~90 for tomorrow.
+    # Tight range: the old chandelier (~90) sat ABOVE today's low of 89 — a same-bar
+    # ratchet would have stopped this trade out. The fixed stop (80) must rule, and
+    # in legacy it must still be 80 after the run.
     df = _ohlcv(last_low=89.0, last_high=101.0)
     rep = reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker,
                                loader=FakeLoader(df))
     assert rep.exits_submitted == []
     t = _read(s.run.db_url)
     assert t["status"] == "open"
-    assert t["effective_stop"] is not None and t["effective_stop"] > 80.0
+    assert t["effective_stop"] == 80.0
 
 
 def test_exit_finalizes_from_stop_fill_when_position_already_gone(tmp_path, monkeypatch):

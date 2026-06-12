@@ -19,4 +19,6 @@ def _hermetic_secrets(monkeypatch):
     monkeypatch.setitem(Secrets.model_config, "env_file", None)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("SWING_DATABASE_URL", raising=False)
+    # Test backtests are not real runs — keep them out of the runs audit file.
+    monkeypatch.setenv("SWING_RUNS_AUDIT", "off")
     yield

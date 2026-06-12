@@ -86,6 +86,14 @@ class ScoringCfg(StrictModel):
     # (0 = disabled). Momentum ranking favors the most extended names; this bounds
     # buying blow-off tops that mean-revert before reaching the 2R target.
     max_extension_atr: float = Field(default=0.0, ge=0)
+    # Conviction-tier SIZE multipliers (2026-06-11, configurable). The historical
+    # 1.0/0.66/0.33 stack double-charged conviction: the composite threshold +
+    # budget ranking already select for it, then the size multiplier shrank the
+    # fill again — one leg of the ~0.3% effective risk vs 1% nominal finding.
+    # Defaults preserve the original behavior.
+    tier_mult_high: float = Field(default=1.0, gt=0, le=1)
+    tier_mult_medium: float = Field(default=0.66, gt=0, le=1)
+    tier_mult_low: float = Field(default=0.33, gt=0, le=1)
 
     @model_validator(mode="after")
     def _tiers_ordered(self) -> ScoringCfg:
@@ -123,13 +131,22 @@ class RiskCfg(StrictModel):
     rr_target: float = Field(gt=0)
     max_positions: int = Field(ge=1, le=50)
     portfolio_heat_cap: float = Field(gt=0, le=1)
-    sector_heat_cap: float = Field(gt=0, le=1)
     max_per_sector: int = Field(ge=1)
     daily_loss_halt: float = Field(gt=0, le=1)
     weekly_loss_halt: float = Field(gt=0, le=1)
     monthly_loss_halt: float = Field(gt=0, le=1)
     drawdown_derisk: float = Field(gt=0, le=1)
     drawdown_hard_halt: float = Field(gt=0, le=1)
+    # Drawdown-brake recovery (2026-06-11). The original hard halt was an ABSORBING
+    # state: once dd >= hard_halt, no new entries are allowed, so equity can never
+    # climb back — 2017-19 replay spent 306/752 days dead and missed all of 2019.
+    # peak_lookback bounds the high-water mark to a trailing window (0 = all-time,
+    # the absorbing original); halt_resume_days re-opens entries at
+    # halt_resume_risk_mult size after that many bars of continuous halt (0 = never
+    # resume). Defaults preserve the original behavior for existing configs.
+    drawdown_peak_lookback: int = Field(default=0, ge=0)        # trading bars; 0 = all-time
+    halt_resume_days: int = Field(default=0, ge=0)              # 0 = absorbing halt
+    halt_resume_risk_mult: float = Field(default=0.25, gt=0, le=1)
     # Concentration caps. Risk-at-stop sizing alone gives the LARGEST dollar exposure
     # to the LOWEST-volatility names (notional/equity = risk% / stop%), so a calm
     # mega-cap could absorb half the account; the real tail risk there is a gap
@@ -144,6 +161,11 @@ class UniverseCfg(StrictModel):
     min_dollar_volume: float = Field(ge=0)
     top_n_scan: int = Field(default=30, ge=1)          # cheap-scan survivors handed to scoring
     max_llm_candidates: int = Field(default=30, ge=1)  # cap on names reaching the Claude factor
+    # Live tradable universe = point-in-time S&P 500 only — the universe every
+    # validated holdout traded. False re-admits thematic + news-discovered names,
+    # which are unvalidated and consume the scarce monthly budget slots; flip it
+    # only for explicitly-bucketed exploration, never for the evidence account.
+    sp500_only: bool = True
 
 
 class DataCfg(StrictModel):
@@ -212,6 +234,13 @@ class ExitsCfg(StrictModel):
     stagnation_bars: int = Field(default=15, ge=1)            # cut a non-working trade after N bars
     stagnation_min_r: float = Field(default=1.0)              # "working" threshold (R)
     hard_backstop_bars: int = Field(default=60, ge=1)         # absolute max hold
+    # Chandelier-trail the stop in LEGACY mode too, from day one (owner decision
+    # 2026-06-12). False is the validated combo (fixed ATR stop; the trailed-exit
+    # family lost the ledgered trials). The flag drives live (broker/manage.py)
+    # and the backtest legacy path identically, so the trailed variant is
+    # replayable; the shadow outcome tracker stays on the validated no-trail
+    # reference, so live-vs-shadow R deltas measure what the trail contributes.
+    trail_legacy_stop: bool = False
 
 
 class SizingCfg(StrictModel):
@@ -330,6 +359,8 @@ class Secrets(BaseSettings):
     fred_api_key: SecretStr | None = None
     finnhub_api_key: SecretStr | None = None
     stooq_api_key: SecretStr | None = None
+    tiingo_api_key: SecretStr | None = None
+    massive_api_key: SecretStr | None = None
     sec_edgar_user_agent: str | None = None
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
@@ -340,6 +371,14 @@ class Secrets(BaseSettings):
     smtp_from: str | None = None
     smtp_to: str | None = None
     healthcheck_url: str | None = None
+    # Optional per-step dead-man's switches. With one shared check, a later step's
+    # success ping flips the monitor back up minutes after an earlier step failed —
+    # and a step that silently stops running looks like a normal inter-step gap.
+    # Each falls back to the shared URL when unset, so nothing breaks before the
+    # per-step checks exist on healthchecks.io.
+    healthcheck_trade_url: str | None = None
+    healthcheck_manage_url: str | None = None
+    healthcheck_track_url: str | None = None
     # --- Stage 8+ : automated paper trading + AI + cloud persistence (all optional) ---
     alpaca_api_key: SecretStr | None = None
     alpaca_secret_key: SecretStr | None = None
@@ -412,3 +451,29 @@ def resolve_db_url(settings: Settings, secrets: Secrets | None = None) -> str:
         or settings.run.db_url
     )
     return _normalize_db_url(url)
+
+
+def redact_db_url(url: str) -> str:
+    """Loggable form of a DB URL: scheme + host + db name, never credentials.
+
+    The normalized URL differs from the raw ``DATABASE_URL`` secret (driver pinned,
+    sslmode appended), so GitHub Actions' exact-value masking does NOT cover it —
+    in a public repo the full URL in a log line is a public credential. Anything
+    that logs a resolved URL must go through here. Dependency-free on purpose: a
+    redaction helper that can itself fail open is worse than none.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        if "@" in parts.netloc:
+            host = parts.netloc.rsplit("@", 1)[1]
+            return f"{parts.scheme}://***@{host}{parts.path}"
+        if "@" in url:
+            # '@' outside the netloc means urlsplit did not isolate the credentials
+            # (e.g. a scheme-less 'user:pass@host/db' from a typo'd env var) — don't
+            # risk echoing them.
+            return "<unparseable db url - redacted>"
+        return f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.scheme else url
+    except Exception:  # noqa: BLE001 - never raise, never echo the input back
+        return "<unparseable db url - redacted>"

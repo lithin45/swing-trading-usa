@@ -111,12 +111,14 @@ class Outcome(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), unique=True)
     status: Mapped[str] = mapped_column(default="open")  # open|target_hit|stopped|time_exit
-    actual_entry: Mapped[float | None] = mapped_column(default=None)  # user fill (for slippage)
+    actual_entry: Mapped[float | None] = mapped_column(default=None)  # broker fill (for slippage)
     exit_price: Mapped[float | None] = mapped_column(default=None)
     exit_date: Mapped[date | None] = mapped_column(default=None)
     bars_held: Mapped[int | None] = mapped_column(default=None)
     realized_r: Mapped[float | None] = mapped_column(default=None)
     pct_return: Mapped[float | None] = mapped_column(default=None)
+    # (actual_entry - reference entry) / reference entry, where the reference is the
+    # tracker's market-at-next-open model fill; positive = paid more than the model.
     slippage: Mapped[float | None] = mapped_column(default=None)
     mae: Mapped[float | None] = mapped_column(default=None)  # max adverse excursion (R)
     mfe: Mapped[float | None] = mapped_column(default=None)  # max favorable excursion (R)
@@ -199,6 +201,32 @@ class Trade(Base):
 
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
+
+
+class BrokerRejection(Base):
+    """One live entry-gate decision that blocked a submission — the broker-side audit trail.
+
+    ``rejections`` covers signal-time vetoes; this covers the deployed account-level
+    gates in ``broker.entries`` (drawdown halt, max positions, portfolio heat cap,
+    sector cap, gross-exposure cap, sizing skips), which otherwise exist only as a
+    one-line log in the CI output. ``details`` carries the cap values in force at
+    decision time as JSON. ``(signal_date, symbol, gate)`` keeps a same-day re-run
+    idempotent.
+    """
+
+    __tablename__ = "broker_rejections"
+    __table_args__ = (
+        UniqueConstraint("signal_date", "symbol", "gate", name="uq_broker_rej_day_symbol_gate"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    signal_date: Mapped[date]
+    symbol: Mapped[str] = mapped_column(String(16))
+    gate: Mapped[str] = mapped_column(String(24))
+    # halt | max_positions | heat_cap | sector_cap | gross_exposure | size
+    reason: Mapped[str | None] = mapped_column(Text, default=None)
+    details: Mapped[str | None] = mapped_column(Text, default=None)  # JSON: caps at decision time
+    created_at: Mapped[datetime]
 
 
 class AccountSnapshot(Base):

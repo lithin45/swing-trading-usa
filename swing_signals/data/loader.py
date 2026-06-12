@@ -51,6 +51,22 @@ class DataLoader:
                     log.info("alpaca provider disabled (no SWING_ALPACA_API_KEY/SECRET_KEY)")
             elif name == "yfinance":
                 providers.append(YfinanceProvider())
+            elif name == "tiingo":
+                from .tiingo_provider import TiingoProvider
+
+                tp = TiingoProvider(api_key=_reveal(self.secrets.tiingo_api_key))
+                if tp.available:
+                    providers.append(tp)
+                else:
+                    log.info("tiingo provider disabled (no SWING_TIINGO_API_KEY)")
+            elif name == "massive":
+                from .massive_provider import MassiveProvider
+
+                mp = MassiveProvider(api_key=_reveal(self.secrets.massive_api_key))
+                if mp.available:
+                    providers.append(mp)
+                else:
+                    log.info("massive provider disabled (no SWING_MASSIVE_API_KEY)")
             elif name == "stooq":
                 sp = StooqProvider(api_key=_reveal(self.secrets.stooq_api_key))
                 if sp.available:
@@ -89,19 +105,41 @@ class DataLoader:
             if fresh is not None:
                 return fresh
 
-        # 2) offline mode: cache only.
+        # 2) offline mode: cache only — TRIMMED to the requested range. The cache
+        # holds each symbol's full union of every range ever fetched (13y+ after
+        # the 2026-06 refill); returning it whole made every offline backtest
+        # carry ~3300-bar frames per symbol (memory + per-bar slice cost), which
+        # is how three concurrent matrix runs swapped a 16GB machine to a 20-hour
+        # standstill. Honor the caller's [start, end] like the providers do.
         if offline:
             cached = self.cache.get(symbol)
             if cached is not None:
-                return cached
+                trimmed = cached[
+                    (cached.index >= pd.Timestamp(start[:10]))
+                    & (cached.index <= pd.Timestamp(end[:10]))
+                ]
+                if len(trimmed) > 0:
+                    return trimmed
+                raise PermanentDataError(
+                    f"offline: cached data for {symbol} has no bars in [{start}, {end}]"
+                )
             raise PermanentDataError(f"offline: no cached data for {symbol}")
 
-        # 3) try providers in order; cache each success. A degenerate response —
-        # a handful of bars against a multi-month request (a throttled yfinance
-        # has returned 1-bar frames) — counts as a failure: the next provider (or
-        # the stale-cache fallback) beats silently acting on a gutted frame.
+        # 3) try providers in order; cache each success. Two response-quality guards:
+        # (a) degenerate: a handful of bars against a multi-month request (a
+        #     throttled yfinance has returned 1-bar frames);
+        # (b) START-TRUNCATED: a provider silently serving less history than asked
+        #     (Alpaca's free IEX feed caps at ~6 years FROM TODAY regardless of the
+        #     requested start — discovered 2026-06-10 when it carved a 210-day hole
+        #     into the union-merge cache and the backtest traded zombie signals).
+        #     A truncated frame is kept as a fallback candidate, but deeper-history
+        #     providers get a chance first; the deepest response wins. A genuinely
+        #     young listing (IPO after `start`) yields the same start date from
+        #     every provider, so it is served normally rather than rejected.
         errors: list[str] = []
         req_days = (date.fromisoformat(end[:10]) - date.fromisoformat(start[:10])).days
+        start_ts = pd.Timestamp(start[:10])
+        best_partial: pd.DataFrame | None = None
         for provider in self.providers:
             try:
                 df = provider.get_ohlcv(symbol, start, end)
@@ -109,11 +147,30 @@ class DataLoader:
                     raise TransientDataError(
                         f"degenerate response: {len(df)} bars for a {req_days}-day request"
                     )
+                if (
+                    df is not None and len(df) > 0
+                    and (df.index[0] - start_ts).days > 10  # > ~7 trading days late
+                ):
+                    if best_partial is None or df.index[0] < best_partial.index[0]:
+                        best_partial = df
+                    log.info(
+                        "provider %s start-truncated %s: asked %s, got %s — trying deeper",
+                        provider.name, symbol, start[:10], df.index[0].date(),
+                    )
+                    continue
                 self.cache.put(symbol, df)
                 return df
             except Exception as exc:  # noqa: BLE001 - try the next provider
                 errors.append(f"{provider.name}: {exc}")
                 log.warning("provider %s failed for %s: %s", provider.name, symbol, exc)
+
+        if best_partial is not None:  # deepest truncated response beats nothing
+            log.warning(
+                "all providers start-truncated for %s; using deepest (starts %s)",
+                symbol, best_partial.index[0].date(),
+            )
+            self.cache.put(symbol, best_partial)
+            return best_partial
 
         # 4) last resort: stale cache beats no data (the quality gate will flag it).
         cached = self.cache.get(symbol)

@@ -197,8 +197,26 @@ def test_bracket_fill_opens_and_captures_legs(tmp_path, monkeypatch):
     assert t["stop_loss_order_id"] == "SL1"
 
 
-def test_bracket_trails_stop_leg(tmp_path, monkeypatch):
+def test_bracket_stop_leg_holds_when_trail_disabled(tmp_path, monkeypatch):
+    """trail_legacy_stop=false (validated combo): the server-side stop leg never moves."""
     s = _settings(tmp_path)
+    s.exits.trail_legacy_stop = False
+    broker = FakeBracketBroker(positions=[BrokerPosition("AAPL", 333, 100.0, 38628.0, 0.0, 116.0)])
+    _seed_trade(s.run.db_url, status="open", qty=333.0, stop_price=94.0, effective_stop=94.0,
+                target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0,
+                stop_loss_order_id="SL1")
+    df = _ohlcv(last_low=115.0, last_high=117.0, hi=118.0, lo=114.0, close=116.0)
+    reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker, loader=FakeLoader(df))
+    t = _read(s.run.db_url)
+    assert t["status"] == "open"
+    assert t["effective_stop"] == 94.0   # HOLDS — no trail
+    assert not broker.replaced           # the server-side stop leg was never moved
+
+
+def test_bracket_trails_stop_leg_when_flag_enabled(tmp_path, monkeypatch):
+    """trail_legacy_stop=true (owner variant): the stop leg trails up to the chandelier."""
+    s = _settings(tmp_path)
+    s.exits.trail_legacy_stop = True
     broker = FakeBracketBroker(positions=[BrokerPosition("AAPL", 333, 100.0, 38628.0, 0.0, 116.0)])
     _seed_trade(s.run.db_url, status="open", qty=333.0, stop_price=94.0, effective_stop=94.0,
                 target_price=200.0, entry_fill_date=DAY, actual_entry=100.0, risk_per_share=6.0,

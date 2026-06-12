@@ -143,7 +143,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "track":
         from .tracking.outcomes import run_tracker
         rc = run_tracker(settings=settings, secrets=secrets, offline=args.offline)
-        ping(secrets.healthcheck_url, fail=rc != 0)
+        if rc == 0:
+            # Live-vs-shadow reconciliation (fills, slippage, R deltas) — the paper
+            # period's evidence report. Best-effort: it must never fail the tracker.
+            try:
+                from .tracking.reconcile import run_reconcile
+                run_reconcile(settings, secrets)
+            except Exception as exc:  # noqa: BLE001 - reporting must not break tracking
+                print(f"reconcile failed (non-fatal): {exc}", file=sys.stderr)
+        ping(secrets.healthcheck_track_url or secrets.healthcheck_url, fail=rc != 0)
         return rc
 
     if args.command == "trade":
@@ -151,7 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         rc = run_trade(
             settings=settings, secrets=secrets, dry_run=args.dry_run, offline=args.offline
         )
-        ping(None if args.dry_run else secrets.healthcheck_url, fail=rc != 0)
+        url = secrets.healthcheck_trade_url or secrets.healthcheck_url
+        ping(None if args.dry_run else url, fail=rc != 0)
         return rc
 
     if args.command == "manage":
@@ -159,7 +168,8 @@ def main(argv: list[str] | None = None) -> int:
         rc = run_manage(
             settings=settings, secrets=secrets, dry_run=args.dry_run, offline=args.offline
         )
-        ping(None if args.dry_run else secrets.healthcheck_url, fail=rc != 0)
+        url = secrets.healthcheck_manage_url or secrets.healthcheck_url
+        ping(None if args.dry_run else url, fail=rc != 0)
         return rc
 
     # Default: daily run (``swing-signals`` or ``swing-signals run``).

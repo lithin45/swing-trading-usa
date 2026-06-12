@@ -26,6 +26,7 @@ from swing_signals.persistence.models import (  # noqa: E402
     AccountSnapshot,
     Base,
     Brief,
+    BrokerRejection,
     NewsItem,
     NewsScore,
     Outcome,
@@ -114,6 +115,31 @@ def query_brief(engine, day: date) -> str | None:
     return None if df.empty else str(df.iloc[0]["text"])
 
 
+def query_broker_rejections(engine, limit: int = 500) -> pd.DataFrame:
+    return _df(
+        engine,
+        select(BrokerRejection).order_by(BrokerRejection.signal_date.desc()).limit(limit),
+    )
+
+
+def reconciliation_report(engine) -> tuple[pd.DataFrame, dict]:
+    """Per-trade live-vs-shadow reconciliation rows + aggregate summary.
+
+    Delegates to ``swing_signals.tracking.reconcile`` so the dashboard shows the
+    exact numbers the track job logs — one reconciliation, two surfaces.
+    """
+    from dataclasses import asdict
+
+    from sqlalchemy.orm import Session
+
+    from swing_signals.tracking.reconcile import reconcile
+
+    with Session(engine) as session:
+        report = reconcile(session)
+    rows = pd.DataFrame([asdict(r) for r in report.rows])
+    return rows, report.summary()
+
+
 def trade_stats(trades: pd.DataFrame) -> dict:
     """Win rate / expectancy / profit factor from closed trades."""
     closed = trades[trades["status"] == "closed"] if "status" in trades else trades
@@ -164,6 +190,16 @@ def load_news(symbol: str | None = None) -> pd.DataFrame:
 @st.cache_data(ttl=300)
 def load_news_scores() -> pd.DataFrame:
     return query_news_scores(get_engine())
+
+
+@st.cache_data(ttl=300)
+def load_broker_rejections(limit: int = 500) -> pd.DataFrame:
+    return query_broker_rejections(get_engine(), limit=limit)
+
+
+@st.cache_data(ttl=300)
+def load_reconciliation() -> tuple[pd.DataFrame, dict]:
+    return reconciliation_report(get_engine())
 
 
 @st.cache_data(ttl=600)

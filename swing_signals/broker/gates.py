@@ -72,15 +72,30 @@ def evaluate_gates(
     if account.trading_blocked or account.account_blocked:
         return _halt(state, "account/trading blocked at the broker")
 
-    # --- drawdown from peak equity (peak over snapshot history + now) ---
+    # --- drawdown vs the (possibly trailing) high-water mark ---
+    # Mirrors backtest.runner._trailing_dd / halt_state exactly: peak_lookback
+    # bounds the peak to the last N daily snapshots (0 = all-time, the original
+    # absorbing behavior); after halt_resume_days consecutive snapshots at/under
+    # the hard-halt line, entries re-open at halt_resume_risk_mult size instead
+    # of staying dead until a human resets the account.
     equities = [float(s.equity) for s in snapshots] + [equity]
-    peak = max(equities) if equities else equity
-    if peak > 0:
-        dd = (peak - equity) / peak
-        if dd >= risk.drawdown_hard_halt:
+    dd = _trailing_dd_at(equities, len(equities) - 1, risk.drawdown_peak_lookback)
+    if dd >= risk.drawdown_hard_halt:
+        resumed = False
+        if risk.halt_resume_days > 0:
+            i, run_len = len(equities) - 1, 0
+            lookback = risk.drawdown_peak_lookback
+            while i >= 0 and run_len < risk.halt_resume_days:
+                if _trailing_dd_at(equities, i, lookback) < risk.drawdown_hard_halt:
+                    break
+                run_len += 1
+                i -= 1
+            resumed = run_len >= risk.halt_resume_days
+        if not resumed:
             return _halt(state, f"drawdown {dd:.1%} >= hard halt {risk.drawdown_hard_halt:.0%}")
-        if dd >= risk.drawdown_derisk:
-            state.derisk_multiplier = 0.5
+        state.derisk_multiplier = risk.halt_resume_risk_mult
+    elif dd >= risk.drawdown_derisk:
+        state.derisk_multiplier = 0.5
 
     # --- daily / weekly / monthly loss-halts (vs the period's opening equity) ---
     start_of_week = today - timedelta(days=today.weekday())
@@ -101,6 +116,17 @@ def _halt(state: GateState, reason: str) -> GateState:
     state.halted = True
     state.halt_reason = reason
     return state
+
+
+def _trailing_dd_at(equities: list[float], i: int, lookback: int) -> float:
+    """Drawdown (positive = loss) of ``equities[i]`` vs its trailing high-water mark.
+
+    ``lookback`` counts daily snapshots (0 = all-time peak). Same semantics as
+    ``backtest.runner._trailing_dd`` so live gates and the replay agree bar-for-bar.
+    """
+    lo = 0 if lookback <= 0 else max(0, i + 1 - lookback)
+    peak = max(equities[lo:i + 1])
+    return (peak - equities[i]) / peak if peak > 0 else 0.0
 
 
 def can_open(

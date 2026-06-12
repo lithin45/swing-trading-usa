@@ -45,6 +45,8 @@ jobs:
         env:
           SWING_FRED_API_KEY: ${{ secrets.SWING_FRED_API_KEY }}
           SWING_FINNHUB_API_KEY: ${{ secrets.SWING_FINNHUB_API_KEY }}
+          SWING_TIINGO_API_KEY: ${{ secrets.SWING_TIINGO_API_KEY }}
+          SWING_MASSIVE_API_KEY: ${{ secrets.SWING_MASSIVE_API_KEY }}
           SWING_ALPHAVANTAGE_API_KEY: ${{ secrets.SWING_ALPHAVANTAGE_API_KEY }}
           SWING_SEC_EDGAR_USER_AGENT: ${{ secrets.SWING_SEC_EDGAR_USER_AGENT }}
           SWING_ALPACA_API_KEY: ${{ secrets.SWING_ALPACA_API_KEY }}
@@ -69,6 +71,7 @@ jobs:
           SWING_ALPACA_SECRET_KEY: ${{ secrets.SWING_ALPACA_SECRET_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_URL }}
+          SWING_HEALTHCHECK_TRADE_URL: ${{ secrets.SWING_HEALTHCHECK_TRADE_URL }}
         run: swing-signals trade
 
       # 3) Reconcile fills, trail stops, exit (incl. before-earnings), snapshot the
@@ -80,8 +83,11 @@ jobs:
           SWING_ALPACA_API_KEY: ${{ secrets.SWING_ALPACA_API_KEY }}
           SWING_ALPACA_SECRET_KEY: ${{ secrets.SWING_ALPACA_SECRET_KEY }}
           SWING_FINNHUB_API_KEY: ${{ secrets.SWING_FINNHUB_API_KEY }}
+          SWING_TIINGO_API_KEY: ${{ secrets.SWING_TIINGO_API_KEY }}
+          SWING_MASSIVE_API_KEY: ${{ secrets.SWING_MASSIVE_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_URL }}
+          SWING_HEALTHCHECK_MANAGE_URL: ${{ secrets.SWING_HEALTHCHECK_MANAGE_URL }}
         run: swing-signals manage
 
       # 4) Resolve theoretical signal outcomes (realized R / MAE / MFE) vs fresh prices.
@@ -92,6 +98,7 @@ jobs:
           SWING_ALPACA_SECRET_KEY: ${{ secrets.SWING_ALPACA_SECRET_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_URL }}
+          SWING_HEALTHCHECK_TRACK_URL: ${{ secrets.SWING_HEALTHCHECK_TRACK_URL }}
         run: swing-signals track
 
       # NOTE: the old "Archive signal DB" artifact step is gone deliberately. Neon

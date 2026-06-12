@@ -53,6 +53,39 @@ def _reveal(secret):
     return secret.get_secret_value() if secret is not None else None
 
 
+def _gate_key(why: str | None) -> str:
+    """Map a ``can_open`` reason string to the audit table's gate discriminator."""
+    w = (why or "").lower()
+    if "max positions" in w:
+        return "max_positions"
+    if "heat cap" in w:
+        return "heat_cap"
+    if "per sector" in w:
+        return "sector_cap"
+    return "gated"
+
+
+def _persist_gate_decisions(settings, secrets, decisions, now, *, dry_run: bool) -> None:
+    """Best-effort audit write of entry-gate rejections.
+
+    Separate session on purpose: the deployed risk gates' firing history must not
+    be able to roll back the trades the batch just upserted, and a dry run audits
+    nothing (its rejections are hypothetical).
+    """
+    if dry_run or not decisions:
+        return
+    try:
+        from ..persistence import repository as repo
+        from ..persistence.db import make_engine, session_scope
+
+        with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
+            n = repo.save_broker_rejections(session, decisions, created_at=now)
+        if n:
+            log.info("entry gates: %d rejection decision(s) audited", n)
+    except Exception as exc:  # noqa: BLE001 - the audit trail must never break entries
+        log.warning("broker-rejection audit write failed (non-fatal): %s", exc)
+
+
 def _entry_price(signal, ref: str) -> float | None:
     if ref == "zone_low":
         return signal.entry_zone_low
@@ -112,6 +145,7 @@ def submit_entries(
     bp_left = account.buying_power
     gross_notional = sum(abs(p.market_value) for p in live_positions)
     gross_cap = account.equity * settings.risk.max_gross_exposure
+    decisions: list[dict] = []  # gate rejections, audited to broker_rejections
 
     with session_scope(make_engine(resolve_db_url(settings, secrets))) as session:
         signals = repo.get_signals_for_day(session, today)
@@ -123,6 +157,13 @@ def submit_entries(
         if gate.halted:
             report.halted, report.halt_reason = True, gate.halt_reason
             log.warning("entry gate halted: %s", gate.halt_reason)
+            decisions.append({
+                "signal_date": today, "symbol": "*", "gate": "halt",
+                "reason": gate.halt_reason,
+                "details": {"derisk_multiplier": gate.derisk_multiplier,
+                            "n_signals_blocked": len(signals)},
+            })
+            _persist_gate_decisions(settings, secrets, decisions, now, dry_run=dry_run)
             return report
 
         existing = {t.symbol for t in active}
@@ -139,6 +180,17 @@ def submit_entries(
             ok, why = can_open(gate, settings, risk_pct=risk_pct, sector=sector_of.get(sym))
             if not ok:
                 report.skipped_gated.append((sym, why or "gated"))
+                decisions.append({
+                    "signal_date": today, "symbol": sym, "gate": _gate_key(why),
+                    "reason": why,
+                    "details": {
+                        "open_positions": gate.open_positions,
+                        "max_positions": settings.risk.max_positions,
+                        "open_heat_pct": round(gate.open_heat_pct, 4),
+                        "portfolio_heat_cap": settings.risk.portfolio_heat_cap,
+                        "sector": sector_of.get(sym),
+                    },
+                })
                 continue
 
             entry_px = _entry_price(sig, bro.entry_price_ref)
@@ -186,6 +238,13 @@ def submit_entries(
                 )
             if not oq.ok or oq.qty is None:
                 report.skipped_size.append((sym, oq.skipped_reason or "size skip"))
+                decisions.append({
+                    "signal_date": today, "symbol": sym, "gate": "size",
+                    "reason": oq.skipped_reason or "size skip",
+                    "details": {"risk_pct": round(risk_pct, 4),
+                                "entry_price": round(entry_px, 4),
+                                "buying_power_left": round(bp_left, 2)},
+                })
                 continue
 
             new_notional = oq.notional if oq.notional is not None else oq.qty * entry_px
@@ -194,6 +253,14 @@ def submit_entries(
                     (sym, f"gross exposure cap reached "
                           f"({settings.risk.max_gross_exposure:.0%} of equity)")
                 )
+                decisions.append({
+                    "signal_date": today, "symbol": sym, "gate": "gross_exposure",
+                    "reason": f"gross exposure cap reached "
+                              f"({settings.risk.max_gross_exposure:.0%} of equity)",
+                    "details": {"gross_notional": round(gross_notional, 2),
+                                "new_notional": round(new_notional, 2),
+                                "gross_cap": round(gross_cap, 2)},
+                })
                 continue
 
             klass = "bracket" if use_bracket else "simple"
@@ -245,4 +312,5 @@ def submit_entries(
             if sec:
                 gate.sector_counts[sec] = gate.sector_counts.get(sec, 0) + 1
 
+    _persist_gate_decisions(settings, secrets, decisions, now, dry_run=dry_run)
     return report

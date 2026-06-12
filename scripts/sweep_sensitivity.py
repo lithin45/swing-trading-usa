@@ -33,19 +33,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from swing_signals.backtest.config import BacktestCfg
+from validation_common import (
+    CURVES_DIR,
+    append_trial_loud,
+    build_runner,
+    load_earnings_history,
+    load_fred_vix,
+    sweep_trial_id,
+    write_curve_csv,
+)
+
 from swing_signals.backtest.overfitting import cscv_pbo, deflated_sharpe, sharpe_per_period
-from swing_signals.backtest.runner import BacktestRunner
 from swing_signals.backtest.trials import (
     DEFAULT_LEDGER,
     Trial,
-    append_trial,
     ledger_counts,
     load_trials,
 )
 from swing_signals.config_loader import load_secrets, load_settings
 from swing_signals.data.loader import DataLoader
-from swing_signals.universe.membership import members_asof, members_union
+from swing_signals.universe.membership import members_union
 
 # (name, mutate(settings)) — exactly one threshold moved per variant.
 SWEEP = [
@@ -72,7 +79,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default="2017-01-01")
     ap.add_argument("--end", default="2019-12-31")
-    ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--offline", action="store_true",
+                    help="OHLCV from cache only (FRED VIX is still fetched — see "
+                         "--allow-vix-proxy)")
+    ap.add_argument("--allow-vix-proxy", action="store_true",
+                    help="run even when real FRED VIX is unavailable (regime gate "
+                         "falls back to the SPY-ATR%% proxy — NOT comparable to the "
+                         "validated windows)")
     ap.add_argument("--no-ledger", action="store_true",
                     help="skip appending runs to the trial ledger (debug only)")
     # Parallel mode: N workers each run a --variants slice dumping curves to
@@ -81,15 +94,16 @@ def main() -> int:
     ap.add_argument("--variants", default=None,
                     help="comma-separated subset to run (worker mode, with --curves-dir)")
     ap.add_argument("--curves-dir", default=None,
-                    help="dump/read per-variant curves here (workers + --aggregate)")
+                    help="dump/read per-variant curves here (workers + --aggregate); "
+                         "default docs/validation/curves/<window>")
     ap.add_argument("--aggregate", action="store_true",
                     help="combine curves from --curves-dir into the report (no runs)")
     args = ap.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
-    curves_dir = Path(args.curves_dir) if args.curves_dir else None
+    curves_dir = (Path(args.curves_dir) if args.curves_dir
+                  else CURVES_DIR / f"{start}-{end}")
 
     if args.aggregate:
-        assert curves_dir is not None, "--aggregate needs --curves-dir"
         rows, returns_by_variant = [], []
         for name, _ in SWEEP:
             payload = json.loads((curves_dir / f"{name}.json").read_text(encoding="utf-8"))
@@ -98,6 +112,16 @@ def main() -> int:
         return _finalize(rows, returns_by_variant, start, end, no_ledger=args.no_ledger)
 
     settings, secrets = load_settings(), load_secrets()
+    # Real VIX or no sweep: the validated windows replay the regime gate on FRED
+    # VIX; letting --offline silently fall back to the SPY-ATR% proxy compared
+    # apples to oranges. Checked before the expensive symbol load.
+    vix, vix3m = load_fred_vix(settings, secrets)
+    if vix is None and not args.allow_vix_proxy:
+        print("ERROR: real FRED VIX unavailable (missing SWING_FRED_API_KEY or fetch "
+              "failed) — the regime gate would run on the SPY-ATR% proxy, which is not "
+              "comparable to the validated windows. Pass --allow-vix-proxy to override.",
+              file=sys.stderr)
+        return 2
     union = members_union(start, end)
     assert union is not None, "run `swing-signals refresh-sp500` first"
     symbols = sorted(union)
@@ -125,16 +149,7 @@ def main() -> int:
     }
     print(f"loaded {len(ohlcv_all)}/{len(symbols)} symbols", flush=True)
 
-    vix = vix3m = None
-    if not args.offline:
-        from swing_signals.data.fred_provider import FredProvider
-
-        fred = FredProvider(
-            secrets.fred_api_key.get_secret_value() if secrets.fred_api_key else None
-        )
-        if fred.available:
-            vix = fred.get_series(settings.data.fred_series.get("vix", "VIXCLS"))
-            vix3m = fred.get_series(settings.data.fred_series.get("vix3m", "VXVCLS"))
+    earnings_hist = load_earnings_history(ohlcv_all)
 
     shared_panels: dict = {}
     rows: list[dict] = []
@@ -146,15 +161,10 @@ def main() -> int:
             continue
         s = load_settings()
         mutate(s)
-        bt_cfg = BacktestCfg(
-            start=str(start), end=str(end), cost_bps=10.0,
-            max_hold_bars=s.broker.max_hold_bars if s.broker else 20,
-            warmup_bars=210, equity_start=100_000.0,
-        )
-        runner = BacktestRunner(
-            settings=s, bt_cfg=bt_cfg, ohlcv_all=ohlcv_all, index_ohlcv=index_ohlcv,
-            secrets=secrets, universe_asof=members_asof, sector_of=sector_of,
-            vix_series=vix, vix3m_series=vix3m,
+        runner = build_runner(
+            s, secrets, start=start, end=end, ohlcv_all=ohlcv_all,
+            index_ohlcv=index_ohlcv, vix=vix, vix3m=vix3m,
+            earnings_history=earnings_hist, sector_of=sector_of,
         )
         runner._panels = shared_panels  # noqa: SLF001 - identical across variants
         res = runner.run(start, end)
@@ -174,13 +184,13 @@ def main() -> int:
               f"CAGR={m['cagr']:+6.1%} maxDD={m['max_drawdown']:6.1%} "
               f"SRd={sr:+.4f} halted={res.n_halted_days}d "
               f"cad_max={m['cadence']['entries_per_month_max']}", flush=True)
-        if curves_dir is not None:
-            curves_dir.mkdir(parents=True, exist_ok=True)
-            (curves_dir / f"{name}.json").write_text(
-                json.dumps({"row": rows[-1], "returns": rets}), encoding="utf-8"
-            )
+        curves_dir.mkdir(parents=True, exist_ok=True)
+        (curves_dir / f"{name}.json").write_text(
+            json.dumps({"row": rows[-1], "returns": rets}), encoding="utf-8"
+        )
+        write_curve_csv(curves_dir, name, res.trading_days, rets)
 
-    if curves_dir is not None and len(selected) < len(SWEEP):
+    if len(selected) < len(SWEEP):
         return 0  # worker slice done; the --aggregate pass builds the report
 
     return _finalize(rows, returns_by_variant, start, end, no_ledger=args.no_ledger)
@@ -276,7 +286,7 @@ def _finalize(
         added = 0
         for r in rows:
             trial = Trial(
-                id=f"2026-06-10-sweep-{r['name']}-{start}-{end}",
+                id=sweep_trial_id(date.today(), r["name"], start, end),
                 date=str(date.today()), window=f"{start}..{end}",
                 universe="sp500-pit-union", config=f"combo ±10% sweep: {r['name']}",
                 purpose="robustness", source="scripts/sweep_sensitivity.py",
@@ -286,12 +296,9 @@ def _finalize(
                 max_drawdown=round(r["maxdd"], 4), cagr=round(r["cagr"], 4),
                 notes="loss-halt replay ON; budget ON",
             )
-            try:
-                append_trial(trial)
+            if append_trial_loud(trial):
                 added += 1
-            except ValueError:
-                pass  # idempotent re-run
-        print(f"ledger: {added} trial(s) appended to {DEFAULT_LEDGER}")
+        print(f"ledger: {added}/{len(rows)} trial(s) appended to {DEFAULT_LEDGER}")
     return 0
 
 

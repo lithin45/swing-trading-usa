@@ -18,14 +18,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from swing_signals.backtest.config import BacktestCfg
+from validation_common import (
+    CURVES_DIR,
+    build_runner,
+    cagr_of_returns,
+    format_null_benchmarks,
+    load_earnings_history,
+    load_fred_vix,
+    load_tbill_daily,
+    window_returns,
+    write_curve_csv,
+)
+
 from swing_signals.backtest.overfitting import sharpe_per_period
 from swing_signals.backtest.report import format_backtest_report
-from swing_signals.backtest.runner import BacktestRunner
 from swing_signals.backtest.trials import DEFAULT_LEDGER, Trial, append_trial
 from swing_signals.config_loader import load_secrets, load_settings
 from swing_signals.data.loader import DataLoader
-from swing_signals.universe.membership import members_asof, members_union
+from swing_signals.universe.membership import members_union
 
 
 def main() -> int:
@@ -33,6 +43,8 @@ def main() -> int:
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
     ap.add_argument("--label", default=None, help="ledger id suffix (default: window)")
+    ap.add_argument("--config-note", default="combo_lncw (deployed)",
+                    help="config description recorded in the ledger row")
     ap.add_argument("--no-ledger", action="store_true")
     args = ap.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
@@ -67,29 +79,13 @@ def main() -> int:
           f"({n_missing} unfetchable = survivorship residual)", flush=True)
 
     # Real vol history for the regime gate — one cheap HTTP call, key-gated.
-    vix = vix3m = None
-    from swing_signals.data.fred_provider import FredProvider
+    vix, vix3m = load_fred_vix(settings, secrets)
+    earnings_hist = load_earnings_history(ohlcv_all)
 
-    fred = FredProvider(
-        secrets.fred_api_key.get_secret_value() if secrets.fred_api_key else None
-    )
-    if fred.available:
-        try:
-            vix = fred.get_series(settings.data.fred_series.get("vix", "VIXCLS"))
-            vix3m = fred.get_series(settings.data.fred_series.get("vix3m", "VXVCLS"))
-            print("historical VIX/VIX3M loaded from FRED", flush=True)
-        except Exception as exc:  # noqa: BLE001 - degrade to the ATR proxy, loudly
-            print(f"FRED unavailable ({exc}) — regime uses the SPY-ATR% proxy", flush=True)
-
-    bt_cfg = BacktestCfg(
-        start=str(start), end=str(end), cost_bps=10.0,
-        max_hold_bars=settings.broker.max_hold_bars if settings.broker else 20,
-        warmup_bars=210, equity_start=100_000.0,
-    )
-    runner = BacktestRunner(
-        settings=settings, bt_cfg=bt_cfg, ohlcv_all=ohlcv_all, index_ohlcv=index_ohlcv,
-        secrets=secrets, universe_asof=members_asof, sector_of=sector_map(),
-        vix_series=vix, vix3m_series=vix3m,
+    runner = build_runner(
+        settings, secrets, start=start, end=end, ohlcv_all=ohlcv_all,
+        index_ohlcv=index_ohlcv, vix=vix, vix3m=vix3m,
+        earnings_history=earnings_hist, sector_of=sector_map(),
     )
     res = runner.run(start, end)
     report = format_backtest_report(res)
@@ -101,6 +97,29 @@ def main() -> int:
     sr = sharpe_per_period(rets)
 
     label = args.label or f"{start}-{end}"
+    curve_path = write_curve_csv(CURVES_DIR / f"{start}-{end}", f"window-{label}",
+                                 res.trading_days, rets)
+    print(f"return curve persisted to {curve_path} (CSCV PBO input)")
+
+    # Null benchmarks: what equal drawdown pain in SPY/T-bills (or plain MTUM)
+    # would have paid over the same window — the bar the strategy must clear.
+    spy_df = index_ohlcv.get("SPY")
+    spy_rets = window_returns(spy_df, start, end) if spy_df is not None else []
+    mtum_df = None
+    try:
+        mtum_df = loader.get_ohlcv("MTUM", fetch_start, end.isoformat(), offline=True)
+    except Exception:  # noqa: BLE001 - benchmark data is best-effort
+        pass
+    mtum_rets = window_returns(mtum_df, start, end) if mtum_df is not None else None
+    tbill_daily, tbill_note = load_tbill_daily(settings, secrets, start, end)
+    null_section = format_null_benchmarks(
+        strategy_cagr=(m["cagr"] if isinstance(m["cagr"], (int, float))
+                       else cagr_of_returns(rets)),
+        strategy_maxdd=m["max_drawdown"],
+        spy_returns=spy_rets, mtum_returns=mtum_rets,
+        tbill_daily=tbill_daily, tbill_note=tbill_note,
+    )
+
     out = Path(DEFAULT_LEDGER).parent / f"window-{label}.md"
     out.write_text(
         f"# Validation window {start} → {end} (deployed combo, point-in-time S&P 500)\n\n"
@@ -109,7 +128,8 @@ def main() -> int:
         f"{n_missing} unfetchable names are the survivorship residual — results are\n"
         f"OPTIMISTIC by roughly that coverage gap), "
         f"{'real FRED VIX' if vix is not None else 'SPY-ATR% vol proxy'}.\n\n"
-        f"```\n{report}\n```\n",
+        f"```\n{report}\n```\n\n"
+        f"{null_section}\n",
         encoding="utf-8",
     )
     print(f"wrote {out}")
@@ -117,9 +137,9 @@ def main() -> int:
     if not args.no_ledger:
         try:
             append_trial(Trial(
-                id=f"2026-06-10-window-combo-{label}",
+                id=f"{date.today()}-window-{label}",
                 date=str(date.today()), window=f"{start}..{end}",
-                universe="sp500-pit-union", config="combo_lncw (deployed)",
+                universe="sp500-pit-union", config=args.config_note,
                 purpose="validation", source="scripts/run_validation_window.py",
                 n_trades=m["n_trades"], expectancy_r=m["expectancy"],
                 profit_factor=(m["profit_factor"]

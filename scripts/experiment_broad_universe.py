@@ -37,7 +37,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from swing_signals.backtest.config import BacktestCfg
 from swing_signals.backtest.metrics import Trade
+from swing_signals.backtest.overfitting import sharpe_per_period
 from swing_signals.backtest.runner import BacktestRunner
+from swing_signals.backtest.trials import Trial, append_trial
 from swing_signals.config_loader import load_secrets, load_settings
 from swing_signals.data.loader import DataLoader
 from swing_signals.factors import f08_momentum as f08
@@ -98,6 +100,8 @@ def main() -> int:
     ap.add_argument("--dump-dir", default="/tmp/bt_experiments")
     ap.add_argument("--max-workers", type=int, default=None,
                     help="fetch parallelism (lower it for yfinance-heavy deep-past runs)")
+    ap.add_argument("--ledger-round", default=None,
+                    help="append every run to the trial ledger with this round tag (e.g. r3)")
     args = ap.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
     names = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -154,6 +158,17 @@ def main() -> int:
         if len(w) > 1:
             print(f"SPY buy-and-hold {start}..{end}: {w.iloc[-1] / w.iloc[0] - 1.0:+.1%}\n")
 
+    # Historical earnings dates (AV backfill): when the committed table exists,
+    # the EARNINGS_SOON veto replays in these runs. Coverage is printed so a
+    # partially-backfilled table is never mistaken for full screening.
+    from swing_signals.data.earnings_history import EarningsHistory
+
+    earnings_hist = EarningsHistory.load()
+    if earnings_hist is not None:
+        covered = sum(1 for s in ohlcv_all if s in earnings_hist)
+        print(f"earnings history: {covered}/{len(ohlcv_all)} loaded symbols covered "
+              f"(veto replay {'ON' if covered else 'OFF'})\n", flush=True)
+
     shared_panels: dict = {}
     rows = []
     for name in names:
@@ -167,7 +182,7 @@ def main() -> int:
         runner = BacktestRunner(
             settings=s, bt_cfg=bt_cfg, ohlcv_all=ohlcv_all, index_ohlcv=index_ohlcv,
             secrets=secrets, universe_asof=members_asof, sector_of=sector_of,
-            vix_series=vix, vix3m_series=vix3m,
+            vix_series=vix, vix3m_series=vix3m, earnings_history=earnings_hist,
         )
         runner._panels = shared_panels  # noqa: SLF001 - identical across variants
         if name == "rank121":
@@ -179,6 +194,25 @@ def main() -> int:
         rows.append((name, m["n_trades"], m["win_rate"], m["expectancy"],
                      m["profit_factor"], m["cagr"], m["max_drawdown"], m["sharpe"],
                      res.n_unfilled, res.n_capped))
+        if args.ledger_round:
+            eq = [bt_cfg.equity_start, *res.equity_curve]
+            rets = [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq))]
+            try:
+                append_trial(Trial(
+                    id=f"{date.today()}-{args.ledger_round}-{name}-{start}-{end}",
+                    date=str(date.today()), window=f"{start}..{end}",
+                    universe="sp500-pit-union", config=f"{args.ledger_round}: {name}",
+                    purpose="selection", source="scripts/experiment_broad_universe.py",
+                    n_trades=m["n_trades"], expectancy_r=m["expectancy"],
+                    profit_factor=(m["profit_factor"]
+                                   if isinstance(m["profit_factor"], (int, float)) else None),
+                    win_rate=m["win_rate"], sharpe_daily=round(sharpe_per_period(rets), 6),
+                    max_drawdown=m["max_drawdown"], cagr=m["cagr"],
+                    notes=f"halt replay ON; unfilled={res.n_unfilled} capped={res.n_capped} "
+                          f"halted_d={res.n_halted_days}",
+                ))
+            except ValueError:
+                print(f"  (ledger row for {name} already present)", flush=True)
         with (dump_dir / f"trades_{name}_{start}_{end}.csv").open("w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=[f.name for f in fields(Trade)])
             w.writeheader()
@@ -244,6 +278,113 @@ def _mut_old_base(s):
 
 
 VARIANTS["old_base"] = _mut_old_base
+
+
+# --- Round 3 (2026-06-10 overnight, pre-registered): deployment mechanics, not
+# signal patterns. Diagnostics on 2020-21 (ledger ids 2026-06-10-diag-*) showed the
+# per-trade edge survives every variant of the entry/budget question while CAGR
+# moves 10-30x — the strategy's compounding dies in execution mechanics:
+# zombie-free fills, absorbing halts, the 5-multiplier size shrink stack, and
+# right-tail truncation at 20 bars / 2R. One mutation each; selection windows
+# 2015-16 / 2020-21 / 2022-24; survivors combine; 2017-19 + 2025-26 stay untouched
+# for validation.
+
+
+def _mut_market(s):
+    s.broker.entry_order_type = "market"  # signal close -> next-open market entry
+    return s
+
+
+def _mut_brake(s):
+    # Non-absorbing drawdown brake: trailing 1y high-water mark; resume at 0.25x
+    # after 10 halted bars (live gates.py + backtest halt_state share the logic).
+    s.risk.drawdown_peak_lookback = 252
+    s.risk.halt_resume_days = 10
+    s.risk.halt_resume_risk_mult = 0.25
+    return s
+
+
+def _mut_tier_flat(s):
+    # Stop double-charging conviction: threshold+ranking already select for it.
+    # Only High/Medium ever trade (tier_low 60 < composite_min 70).
+    s.scoring.tier_mult_medium = 1.0
+    return s
+
+
+def _mut_hold40(s):
+    s.broker.max_hold_bars = 40  # bt_cfg reads broker.max_hold_bars
+    return s
+
+
+def _mut_staged_v2(s):
+    s.exits.mode = "staged"  # partial @2R + breakeven + chandelier trail (3-ATR-stop era retest)
+    return s
+
+
+VARIANTS["market"] = _mut_market
+VARIANTS["brake"] = _mut_brake
+VARIANTS["tier_flat"] = _mut_tier_flat
+VARIANTS["hold40"] = _mut_hold40
+VARIANTS["staged_v2"] = _mut_staged_v2
+
+
+# --- Round 4 (2026-06-11, pre-registered after r3 landed): r3 said the exit
+# LEASH is the live axis — hold40 best-in-class on the 2020-21 trend (+0.168R,
+# PF 1.35) and worst-in-class in 2015-16 chop (-0.228R). The asymmetric leash
+# already exists in the exit machine as pure config: cut a trade that is not
+# yet working at the stagnation gate, give working trades a longer backstop.
+# Parameters are the SHIPPED staged-mode defaults (stagnation 15 bars / +1R,
+# backstop 60->40), not swept values. brake rides along because the absorbing
+# halt must die for live anyway; its cost shows only as deeper within-window
+# DD on windows that previously froze.
+
+
+def _mut_smart_hold(s):
+    # Full exit at the 2R target (no partial), stagnation cut for non-workers,
+    # 40-bar backstop for workers. partial_take_frac=1.0 => takes_partial=False
+    # => first-target EXIT_ALL, exactly the legacy target behavior.
+    s.exits.mode = "staged"
+    s.exits.partial_take_frac = 1.0
+    s.exits.move_stop_to = "none"
+    s.exits.stagnation_bars = 15
+    s.exits.stagnation_min_r = 1.0
+    s.exits.hard_backstop_bars = 40
+    return s
+
+
+def _mut_smart_hold_brake(s):
+    _mut_smart_hold(s)
+    _mut_brake(s)
+    return s
+
+
+def _mut_hold40_brake(s):
+    _mut_hold40(s)
+    _mut_brake(s)
+    return s
+
+
+VARIANTS["smart_hold"] = _mut_smart_hold
+VARIANTS["smart_hold_brake"] = _mut_smart_hold_brake
+VARIANTS["hold40_brake"] = _mut_hold40_brake
+
+
+# --- Round 5 (2026-06-12, owner-requested): chandelier-trail the LEGACY stop
+# from day one — the exact exit policy the live account ran before the parity
+# fix (broker/manage.py, now config: exits.trail_legacy_stop). Owner thesis:
+# ratcheting the stop up locks in profit on pullbacks. Distinct from the r3/r4
+# trail family (staged_v2 trailed after a partial; hold40/smart_hold changed the
+# leash, not the stop): this cell isolates the day-one trail itself, with the 2R
+# target and 20-bar time-stop unchanged. base re-runs alongside because the
+# Tiingo enrichment changed the universe since the r3/r4 baselines.
+
+
+def _mut_legacy_trail(s):
+    s.exits.trail_legacy_stop = True
+    return s
+
+
+VARIANTS["legacy_trail"] = _mut_legacy_trail
 
 
 if __name__ == "__main__":

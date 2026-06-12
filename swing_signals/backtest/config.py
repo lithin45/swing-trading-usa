@@ -27,3 +27,11 @@ class BacktestCfg(BaseModel):
     # backtest takes entries the live gates would refuse, overstating returns and
     # cadence (audit P1 #4). Turn off only to reproduce pre-2026-06 numbers.
     replay_loss_halts: bool = True
+    # Cost-model stress multipliers (see backtest/costs.py). 1.0 = the historical
+    # flat per-side model, bit-identical to every validated number.
+    stop_exit_cost_mult: float = Field(default=1.0, ge=0)
+    market_entry_cost_mult: float = Field(default=1.0, ge=0)
+    # Credit a risk-free rate on idle cash (needs an rf series passed to the
+    # runner). Default OFF so the equity curve stays comparable to every prior
+    # number; 'alpha over cash' is reported either way when the series is present.
+    rf_credit: bool = False

@@ -27,7 +27,14 @@ if TYPE_CHECKING:
     from ..market.base import MarketState
     from .budget import BudgetState
 
-_TIER_MULT = {"High": 1.0, "Medium": 0.66, "Low": 0.33, "None": 0.0}
+def _tier_mult(tier: str, scoring_cfg) -> float:
+    """Conviction-tier size multiplier, read from config (None tier never sizes)."""
+    return {
+        "High": scoring_cfg.tier_mult_high,
+        "Medium": scoring_cfg.tier_mult_medium,
+        "Low": scoring_cfg.tier_mult_low,
+        "None": 0.0,
+    }[tier]
 
 
 def composite_score(
@@ -140,9 +147,13 @@ def generate_signals(
     sig_date = ctx.trading_day or date.today()
 
     # Instantiate the factors that are both configured (active) and registered.
+    # Enabled factors with weight 0 still compute — their scores persist as research
+    # data (e.g. the Claude news factor at weight 0.0 pending validation) — but the
+    # weight>0 guards in composite_score/agreement_ratio keep them out of the decision.
     register_builtins()
     registered = all_factors()
-    factors = {name: registered[name]() for name in weights if name in registered}
+    computed = {name for name, cfg in settings.factors.items() if cfg.enabled}
+    factors = {name: registered[name]() for name in computed if name in registered}
     missing = [name for name in weights if name not in registered]
 
     actionable: list[Signal] = []
@@ -164,7 +175,11 @@ def generate_signals(
         score, attribution = composite_score(subscores, weights)
         direction = "LONG"  # long-only v1
         agreement = agreement_ratio(subscores, weights, direction)
-        reasons = [r for s in subscores if s.ok for r in s.reasons]
+        # Reasons only from factors that actually weigh on the decision — a weight-0
+        # research factor must not narrate a signal it didn't influence.
+        reasons = [
+            r for s in subscores if s.ok and weights.get(s.name, 0) > 0 for r in s.reasons
+        ]
         flags = list(missing and ["FACTORS_PENDING"] or [])
 
         # --- hard gate: market regime (veto, or green-only-entries selectivity) ---
@@ -335,7 +350,9 @@ def generate_signals(
                 scalar_min=settings.sizing.vol_scalar_min,
                 scalar_max=settings.sizing.vol_scalar_max,
             )
-        conviction_mult = _TIER_MULT[tier] * regime.multiplier * macro_multiplier * vscalar
+        conviction_mult = (
+            _tier_mult(tier, settings.scoring) * regime.multiplier * macro_multiplier * vscalar
+        )
         size = position_size(
             equity=settings.account.equity, entry=levels.entry, stop=levels.stop,
             risk_pct=settings.account.risk_pct, risk_pct_ceiling=settings.account.risk_pct_ceiling,
@@ -372,7 +389,14 @@ def generate_signals(
         ))
 
     # --- rank LONGs and cap to the monthly budget / position / heat limits ---
-    actionable.sort(key=lambda s: s.conviction_score, reverse=True)
+    # Ties break ALPHABETICALLY (scores are rounded to 0.1, so rank-boundary ties
+    # are common) so the ranking never depends on dict insertion order. The
+    # backtest always effectively did this (symbols load sorted, stable sort);
+    # the live path's candidates arrive in screen-rank order, and before the
+    # explicit key the same tied scores selected DIFFERENT names at the
+    # max-positions boundary — real live-vs-validated decision flips (parity
+    # replay 2026-06-12: 4 of 30 days had such swaps).
+    actionable.sort(key=lambda s: (-s.conviction_score, s.ticker))
     selected: list[Signal] = []
     heat = 0.0
     heat_cap = settings.risk.portfolio_heat_cap
