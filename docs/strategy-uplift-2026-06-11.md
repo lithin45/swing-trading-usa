@@ -109,10 +109,33 @@ contaminated predecessor (+0.188R/PF 1.47 vs +0.118R/PF 1.27): the old number
 was dragged down by zombie budget burn, not flattered.
 
 **Verdict on go/no-go #1** (exp > 0 and PF ≥ 1.2 on ≥2 untouched windows):
-with the fresh 2013-14 window added on the 06-11 night session, **two clean
-holdouts now clear the bar** (2013-14 at 1.211, 2025-26 at 1.470) with
-2017-19 at 1.197 just under. Criterion met on its letter; the deflated-Sharpe
-criterion below remains the binding constraint.
+with the fresh 2013-14 window added on the 06-11 night session, two clean
+holdouts cleared the bar (2013-14 at 1.211, 2025-26 at 1.470) with 2017-19 at
+1.197 just under — **but see the survivorship re-validation below before
+celebrating.**
+
+### Survivorship enrichment re-validation (2026-06-12, Tiingo-recovered universe)
+
+42 of the 84 permanently-missing delisted members were recovered via the new
+Tiingo provider and both holdouts re-run on the enriched universe:
+
+| window | universe | n | exp (R) | PF | CAGR | maxDD |
+|---|---|---|---|---|---|---|
+| 2017-19 enriched | 519/580 (was 495) | 220 | **+0.043** (was +0.081) | **1.101** (was 1.197) | +3.09% | **−18.7%** (was −15.6%) |
+| 2025-26 enriched | **530/530 — COMPLETE** | 109 | +0.186 | **1.463** | +9.08% | −10.0% |
+
+The recovered dead names cut 2017-19's expectancy nearly in half — the
+survivorship bias was real and material on that window, and the remaining 61
+missing names would likely push it further down. 2025-26, by contrast, held
+its result on a COMPLETE point-in-time universe: the recent window's edge is
+genuine. 2013-14 (114 names still missing) should be read with the 2017-19
+lesson in mind.
+
+**Honest verdict on #1: one robust pass (2025-26, complete universe), one
+caveated pass (2013-14), one fail after enrichment (2017-19 at PF 1.10).
+Not met.** The free-data ceiling has been reached — 42/84 recovered, 30
+confirmed absent on every free source, 5 pending; full survivorship-free
+history (and deeper windows) needs Norgate/EODHD.
 
 **Deflated Sharpe (go/no-go #2), N = 36 selection trials, var(SR) from the 39
 recorded per-period Sharpes:**
