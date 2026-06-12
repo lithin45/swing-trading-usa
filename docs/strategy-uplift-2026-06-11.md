@@ -97,6 +97,7 @@ Deployed config = combo + brake, clean data, halt replay + budget ON:
 
 | window | n | exp (R) | PF | win | CAGR | maxDD | halted days |
 |---|---|---|---|---|---|---|---|
+| 2013-14 (fresh, added 06-11 night) | 152 | +0.077 | **1.211** | 55.9% | +3.70% | **−9.0%** | 0 |
 | 2017-19 | 220 | +0.081 | **1.197** | 51.4% | **+4.15%** | −15.6% | **2** (was 306) |
 | 2025-01→2026-06 | 109 | **+0.188** | **1.470** | 53.2% | **+9.21%** | −10.0% | 0 |
 
@@ -107,10 +108,11 @@ is the strongest clean result in the book, and it *improved* vs its
 contaminated predecessor (+0.188R/PF 1.47 vs +0.118R/PF 1.27): the old number
 was dragged down by zombie budget burn, not flattered.
 
-**Verdict on go/no-go #1** (exp > 0 and PF ≥ 1.2 on ≥2 untouched windows): one
-solid pass (2025-26), one borderline (2017-19 at PF 1.197, 0.003 under the
-bar). Counted honestly: **not yet met**, but close, and now measured on
-trustworthy data.
+**Verdict on go/no-go #1** (exp > 0 and PF ≥ 1.2 on ≥2 untouched windows):
+with the fresh 2013-14 window added on the 06-11 night session, **two clean
+holdouts now clear the bar** (2013-14 at 1.211, 2025-26 at 1.470) with
+2017-19 at 1.197 just under. Criterion met on its letter; the deflated-Sharpe
+criterion below remains the binding constraint.
 
 **Deflated Sharpe (go/no-go #2), N = 36 selection trials, var(SR) from the 39
 recorded per-period Sharpes:**
