@@ -74,6 +74,9 @@ def compute_metrics(
     *,
     entries_by_month: dict[str, int] | None = None,  # "YYYY-MM" -> NEW entries charged
     budget_cap: int | None = None,                   # the monthly ceiling (None = off)
+    exposure: dict[str, Any] | None = None,          # runner's utilization aggregates
+    fills: dict[str, Any] | None = None,             # limit/market/unfilled counts
+    rejected_shadow: dict[str, Any] | None = None,   # rejected-signal shadow R-stats
 ) -> dict[str, Any]:
     """Return the full file-11 metric suite from a trade log + equity curve."""
 
@@ -81,6 +84,7 @@ def compute_metrics(
     if n == 0:
         out = _empty_metrics(equity_start)
         out["cadence"] = _cadence(trades, entries_by_month, budget_cap)
+        _attach_observational(out, exposure, fills, rejected_shadow)
         return out
 
     rs = [t.realized_r for t in trades]
@@ -130,7 +134,7 @@ def compute_metrics(
 
     trades_per_month = (n / (n_trading_days / 21.0)) if n_trading_days > 0 else 0.0
 
-    return {
+    out = {
         "n_trades": n,
         "trades_per_month": round(trades_per_month, 2),
         # Cadence DISTRIBUTION (mandate §7): a flat average hides the hot month that
@@ -156,11 +160,28 @@ def compute_metrics(
             "calmar_1": calmar >= 1.0 if math.isfinite(calmar) else False,
         },
     }
+    _attach_observational(out, exposure, fills, rejected_shadow)
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _attach_observational(
+    out: dict[str, Any],
+    exposure: dict[str, Any] | None,
+    fills: dict[str, Any] | None,
+    rejected_shadow: dict[str, Any] | None,
+) -> None:
+    """Attach the runner's observational blocks (keys absent when not supplied,
+    so pre-existing consumers of the metric dict see exactly the old shape)."""
+    if exposure is not None:
+        out["exposure"] = exposure
+    if fills is not None:
+        out["fills"] = fills
+    if rejected_shadow is not None:
+        out["rejected_shadow"] = rejected_shadow
 
 def _cadence(
     trades: list[Trade],

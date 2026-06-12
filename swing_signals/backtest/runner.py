@@ -98,6 +98,12 @@ class BacktestResult:
     n_budget_deferred: int = 0  # signals deferred by the monthly entry budget
     n_halted_days: int = 0      # days the replayed loss-halt gates blocked new entries
     n_halt_blocked: int = 0     # actionable signals those halts refused
+    # Costless side-portfolio of budget/cap-rejected signals (same entry/exit
+    # mechanics, zero interaction with the real book). Settles whether the
+    # ≤7/month mandate truncates the right tail or skims low-marginal-R trades —
+    # without burning a selection trial. Fills assume liquidity the real book
+    # might have competed for; read the expectancy, not the dollar P&L.
+    rejected_shadow_trades: list[Trade] | None = None
 
 
 class BacktestRunner:
@@ -130,13 +136,22 @@ class BacktestRunner:
         vix_series: pd.Series | None = None,
         vix3m_series: pd.Series | None = None,
         earnings_history=None,
+        rf_series: pd.Series | None = None,
     ) -> None:
         self.settings = settings
         self.bt_cfg = bt_cfg
         self.ohlcv_all = ohlcv_all
         self.index_ohlcv = index_ohlcv
         self.secrets = secrets
-        self.costs = CostModel(per_side_bps=bt_cfg.cost_bps)
+        self.costs = CostModel(
+            per_side_bps=bt_cfg.cost_bps,
+            stop_exit_mult=getattr(bt_cfg, "stop_exit_cost_mult", 1.0),
+            market_entry_mult=getattr(bt_cfg, "market_entry_cost_mult", 1.0),
+        )
+        # Annualized risk-free yield in percent (e.g. FRED DGS3MO). Drives the
+        # opt-in idle-cash credit (bt_cfg.rf_credit) and, whenever present, the
+        # 'alpha over cash' metric — without touching the equity curve.
+        self._rf = _clean_series(rf_series)
         self._panels: dict[str, pd.DataFrame] = {}  # per-symbol precomputed indicator panel
         # Point-in-time universe filter (None = every loaded symbol, the old behavior)
         # + the symbol->sector map that arms the live correlation cap in the engine.
@@ -204,6 +219,19 @@ class BacktestRunner:
         n_budget_deferred = 0
         n_halted_days = 0
         n_halt_blocked = 0
+        # Exposure/utilization instrumentation (observational — never feeds back
+        # into any decision): how much of the capital actually works.
+        n_open_series: list[int] = []
+        gross_exposure_series: list[float] = []
+        cash_frac_series: list[float] = []
+        n_at_cap_days = 0
+        fill_counter = {"limit": 0, "market": 0}
+        # Costless shadow book replaying budget/cap-rejected signals (see
+        # BacktestResult.rejected_shadow_trades). Same mechanics, no cash clamp,
+        # no caps, no budget charge — and zero writes back to the real book.
+        shadow_positions: dict[str, _OpenPosition] = {}
+        shadow_pending: dict[str, _PendingEntry] = {}
+        shadow_trades: list[Trade] = []
         risk_cfg = self.settings.risk
         entry_type, max_pending, mkt_fallback = self._entry_model()
         # Budget mirror (mandate §4): the same monthly ceiling + cooldown the live
@@ -231,9 +259,21 @@ class BacktestRunner:
             fills, expired, spent = self._work_pending(
                 pending, positions, signal_bar, cash,
                 max_pending=max_pending, market_fallback=mkt_fallback,
+                fill_counter=fill_counter,
             )
             cash -= spent
             n_unfilled += expired
+
+            # 2b. Shadow book: same exit/fill mechanics on the rejected-signal side
+            #     portfolio, with effectively unbounded cash (it is costless paper).
+            shadow_closed, _ = self._check_exits(shadow_positions, signal_bar)
+            for trade in shadow_closed:
+                shadow_trades.append(trade)
+                del shadow_positions[trade.ticker]
+            self._work_pending(
+                shadow_pending, shadow_positions, signal_bar, 1e15,
+                max_pending=max_pending, market_fallback=mkt_fallback,
+            )
 
             # 3. Build sliced data + market context, then run the LIVE signal engine.
             symbol_data = self._build_symbol_data(signal_bar)
@@ -269,6 +309,25 @@ class BacktestRunner:
                 1 for s in result.no_trades if "BUDGET_EXHAUSTED" in s.flags
             )
 
+            def _shadow_submit(sig, _bar=signal_bar):
+                """Queue a budget/cap-rejected signal into the costless shadow book."""
+                if sig.ticker in shadow_positions or sig.ticker in shadow_pending:
+                    return
+                limit = self._limit_price(sig)
+                shares = sig.suggested_shares or 0.0
+                if limit is None or limit <= 0 or shares <= 0:
+                    return
+                shadow_pending[sig.ticker] = _PendingEntry(
+                    ticker=sig.ticker, signal_date=_bar, limit=limit,
+                    stop=sig.stop_price or 0.0, target=sig.target_price or 0.0,
+                    shares=shares, risk_frac=0.0,
+                    is_market=(entry_type == "market"),
+                )
+
+            for sig in result.no_trades:
+                if "BUDGET_EXHAUSTED" in sig.flags:
+                    _shadow_submit(sig)
+
             # 4. Submit new entries under the LIVE portfolio constraints. Pending
             #    orders count toward the caps exactly as live active_trades do; the
             #    live loss-halt/drawdown gates are replayed first (audit P1 #4) —
@@ -290,6 +349,7 @@ class BacktestRunner:
                     continue
                 if len(positions) + len(pending) >= risk_cfg.max_positions:
                     n_capped += 1
+                    _shadow_submit(sig)
                     continue
                 open_heat = (
                     sum(p.risk_frac for p in positions.values())
@@ -298,6 +358,7 @@ class BacktestRunner:
                 risk_frac = (sig.suggested_risk_pct or 0.0) * risk_mult
                 if open_heat + risk_frac > risk_cfg.portfolio_heat_cap + 1e-9:
                     n_capped += 1
+                    _shadow_submit(sig)
                     continue
                 limit = self._limit_price(sig)
                 shares = (sig.suggested_shares or 0.0) * risk_mult
@@ -312,9 +373,22 @@ class BacktestRunner:
                 # One submission = one budget charge (mirrors a live `trades` row).
                 charged_by_month[mkey] = charged_by_month.get(mkey, 0) + 1
 
+            # 4b. Opt-in risk-free credit on idle cash (default OFF — flipping it
+            #     changes the equity curve, so every comparison must say so).
+            if self.bt_cfg.rf_credit and self._rf is not None and cash > 0:
+                rate = _series_asof(self._rf, signal_bar)
+                if rate is not None:
+                    cash *= (1.0 + rate / 100.0) ** (1.0 / 252.0)
+
             # 5. Equity = cash + value of what is actually held at this close.
-            equity = cash + self._open_value(positions, signal_bar)
+            open_value = self._open_value(positions, signal_bar)
+            equity = cash + open_value
             equity_curve.append(equity)
+            n_open_series.append(len(positions))
+            gross_exposure_series.append(open_value / equity if equity > 0 else 0.0)
+            cash_frac_series.append(cash / equity if equity > 0 else 0.0)
+            if len(positions) + len(pending) >= risk_cfg.max_positions:
+                n_at_cap_days += 1
 
             # Increment bars held (skip positions that fill on a later bar — none
             # under the limit model, but keeps the invariant explicit).
@@ -336,6 +410,14 @@ class BacktestRunner:
                         cash += pos.shares * (1.0 - pos.partial_frac) * exit_price
                         del positions[ticker]
             n_unfilled += len(pending)
+            # Shadow book closes on the same convention so its R stats are complete.
+            for ticker, pos in list(shadow_positions.items()):
+                last_ohlcv = self.ohlcv_all.get(ticker)
+                row = _bar_at(last_ohlcv, last_bar) if last_ohlcv is not None else None
+                if row is not None:
+                    exit_price = self.costs.fill_exit(float(row["close"]))
+                    shadow_trades.append(_make_trade(pos, last_bar, exit_price, "end_of_range"))
+                del shadow_positions[ticker]
             # The last equity point now reflects liquidation (with exit costs), not
             # a costless mark — keeps metrics['equity_end'] equal to realized cash.
             if equity_curve:
@@ -346,8 +428,39 @@ class BacktestRunner:
             trades, equity_curve or [equity_start], equity_start, n_days,
             entries_by_month=charged_by_month,
             budget_cap=budget_cfg.max_entries_per_month if budget_cfg.enabled else None,
+            exposure={
+                "avg_open_positions": _mean_or_zero(n_open_series),
+                "max_open_positions": max(n_open_series) if n_open_series else 0,
+                "avg_gross_exposure": _mean_or_zero(gross_exposure_series),
+                "max_gross_exposure": (max(gross_exposure_series)
+                                       if gross_exposure_series else 0.0),
+                "avg_cash_fraction": _mean_or_zero(cash_frac_series),
+                "pct_days_at_position_cap": (
+                    round(n_at_cap_days / n_days, 4) if n_days > 0 else 0.0
+                ),
+            },
+            fills=dict(
+                fill_counter,
+                unfilled=n_unfilled,
+                limit_fill_rate=(
+                    round(fill_counter["limit"]
+                          / (fill_counter["limit"] + fill_counter["market"] + n_unfilled), 4)
+                    if (fill_counter["limit"] + fill_counter["market"] + n_unfilled) > 0
+                    else None
+                ),
+            ),
+            rejected_shadow=_shadow_summary(shadow_trades, n_budget_deferred, n_capped),
         )
-        return BacktestResult(
+        if self._rf is not None and n_days > 0:
+            rf_growth = 1.0
+            for d in trading_days:
+                rate = _series_asof(self._rf, d)
+                if rate is not None:
+                    rf_growth *= (1.0 + rate / 100.0) ** (1.0 / 252.0)
+            rf_cagr = rf_growth ** (252.0 / n_days) - 1.0
+            metrics["rf_cagr"] = round(rf_cagr, 4)
+            metrics["alpha_over_cash_cagr"] = round(metrics["cagr"] - rf_cagr, 4)
+        result = BacktestResult(
             trades=trades,
             equity_curve=equity_curve or [equity],
             trading_days=trading_days,
@@ -360,7 +473,10 @@ class BacktestRunner:
             n_budget_deferred=n_budget_deferred,
             n_halted_days=n_halted_days,
             n_halt_blocked=n_halt_blocked,
+            rejected_shadow_trades=shadow_trades,
         )
+        _audit_run(self.settings, start, end, result)
+        return result
 
     def _entry_model(self) -> tuple[str, int, bool]:
         """(entry_order_type, max_pending_days, market_fallback) — the live execution model.
@@ -392,6 +508,7 @@ class BacktestRunner:
         *,
         max_pending: int,
         market_fallback: bool,
+        fill_counter: dict[str, int] | None = None,
     ) -> tuple[int, int, float]:
         """Fill / age / expire resting entries against ``bar`` -> (fills, expired, spent).
 
@@ -400,6 +517,7 @@ class BacktestRunner:
         After ``max_pending`` sessions the order becomes a market order filling at
         the next processed bar's open (or expires when fallback is off). Fills are
         clamped to available cash (live clamps to buying power at submit).
+        ``fill_counter`` (when given) tallies 'limit' vs 'market' fills.
         """
         fills = 0
         expired = 0
@@ -430,7 +548,7 @@ class BacktestRunner:
                         expired += 1
                 continue
 
-            entry_fill = self.costs.fill_long_entry(raw_px)
+            entry_fill = self.costs.fill_long_entry(raw_px, market=po.is_market)
             stop, target = po.stop, po.target
             # Live re-anchors stop/target to the actual fill at the same dollar
             # distances when it deviates >0.1% from the plan (market fallbacks).
@@ -467,6 +585,8 @@ class BacktestRunner:
             )
             spent += shares * entry_fill
             fills += 1
+            if fill_counter is not None:
+                fill_counter["market" if po.is_market else "limit"] += 1
             del pending[ticker]
         return fills, expired, spent
 
@@ -619,7 +739,7 @@ class BacktestRunner:
                     proceeds += pos.shares * pos.partial_frac * pos.partial_fill
                 elif act.kind == "EXIT_ALL":
                     px = act.price if act.price is not None else float(row["close"])
-                    exit_fill = self.costs.fill_exit(px)
+                    exit_fill = self.costs.fill_exit(px, reason=act.reason)
                     closed.append(_make_trade(pos, bar, exit_fill, act.reason))
                     proceeds += pos.shares * (1.0 - pos.partial_frac) * exit_fill
                     break  # fully closed — stop processing this position
@@ -675,6 +795,68 @@ class BacktestRunner:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+def _mean_or_zero(values: list) -> float:
+    return round(sum(values) / len(values), 4) if values else 0.0
+
+
+def _shadow_summary(shadow_trades: list[Trade], n_budget: int, n_capped: int) -> dict:
+    """R-stats of the rejected-signal shadow book (the budget-mandate evidence)."""
+    rs = [t.realized_r for t in shadow_trades]
+    winners = [r for r in rs if r > 0]
+    losers = [r for r in rs if r <= 0]
+    return {
+        "n": len(rs),
+        "n_budget_rejected": n_budget,
+        "n_cap_rejected": n_capped,
+        "expectancy": round(sum(rs) / len(rs), 4) if rs else None,
+        "win_rate": round(len(winners) / len(rs), 4) if rs else None,
+        "profit_factor": (
+            round(sum(winners) / abs(sum(losers)), 4)
+            if losers and sum(losers) != 0
+            else None
+        ),
+    }
+
+
+def _audit_run(settings, start: date, end: date, result: BacktestResult) -> None:
+    """Append one line per BacktestRunner.run() to a runs audit file (best-effort).
+
+    The trial ledger counts what a human LOOKED at; this counts what actually RAN,
+    so an unledgered look (ad-hoc script, --no-ledger flag) is reconstructable
+    instead of invisible — under-counting N is the failure mode DSR polices.
+    Opt-out with SWING_RUNS_AUDIT=off (tests do); never breaks a run.
+    """
+    import hashlib
+    import json
+    import os
+
+    target = os.environ.get("SWING_RUNS_AUDIT", "")
+    if target.lower() in ("off", "0", "disabled"):
+        return
+    try:
+        from pathlib import Path
+
+        from .trials import DEFAULT_LEDGER
+
+        path = Path(target) if target else Path(DEFAULT_LEDGER).parent / "runs.jsonl"
+        cfg_md5 = hashlib.md5(
+            settings.model_dump_json().encode("utf-8")
+        ).hexdigest()[:12]
+        line = json.dumps({
+            "date": str(date.today()),
+            "window": f"{start}..{end}",
+            "config_md5": cfg_md5,
+            "n_trades": result.metrics.get("n_trades"),
+            "expectancy_r": result.metrics.get("expectancy"),
+            "equity_end": result.metrics.get("equity_end"),
+        })
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:  # noqa: BLE001, S110 - the audit must never break a run
+        pass
+
 
 def halt_state(
     risk_cfg,
@@ -735,8 +917,9 @@ def halt_state(
         resume = getattr(risk_cfg, "halt_resume_days", 0)
         if resume > 0:
             i, run_len = len(equity_curve) - 1, 0
+            hard_halt = -risk_cfg.drawdown_hard_halt
             while i >= 0 and run_len < resume:
-                if _trailing_dd(equity_curve, equity_start, i, risk_cfg) > -risk_cfg.drawdown_hard_halt:
+                if _trailing_dd(equity_curve, equity_start, i, risk_cfg) > hard_halt:
                     break
                 run_len += 1
                 i -= 1
