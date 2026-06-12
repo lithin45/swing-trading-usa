@@ -404,13 +404,11 @@ def _manage_open(
             report.exits_submitted.append((trade.symbol, reason))
         return
 
-    # 2) not exiting -> ratchet the chandelier for the NEXT session (only ever rises)
-    chand = chandelier(df, settings.risk.chandelier_lookback, settings.risk.chandelier_multiple)
-    if chand is not None:
-        eff = max(eff, chand) if eff is not None else chand
-    if eff is not None and not dry_run:
-        trade.effective_stop = eff
-        trade.chandelier_stop = chand if chand is not None else trade.chandelier_stop
+    # 2) not exiting -> the stop HOLDS. This function only runs in legacy mode
+    #    (staged dispatches to _manage_open_staged), and legacy never trails: the
+    #    validated backtest holds the fixed ATR stop + 2R target + time-stop, and
+    #    the chandelier-trail family lost the ledgered trials twice. A trail here
+    #    (removed 2026-06-12) had live paper trading an unvalidated exit policy.
 
     # 3) keep a standalone STOP-DAY protective order at the effective stop
     if bro.place_protective_stops and eff is not None and not dry_run:
@@ -698,28 +696,22 @@ def _manage_open_bracket(
     broker, settings, trade, today, now, positions, loader, report, dry_run, offline,
     earnings: dict[str, date] | None = None,
 ) -> None:
-    """Open bracketed position: trail the stop leg; time/earnings-stop manually; reconcile OCO."""
+    """Open bracketed position: hold the OCO legs; time/earnings-stop manually; reconcile.
+
+    The server-side stop leg HOLDS at the fixed ATR stop. This path only runs in
+    legacy mode (staged dispatches to _manage_open_staged), and legacy never
+    trails — the chandelier ratchet was removed 2026-06-12 for live/validated
+    parity (see _manage_open).
+    """
     pos = positions.get(trade.symbol)
     if pos is None:  # a child leg (stop or target) filled — reconcile P&L
         _reconcile_bracket_exit(broker, trade, today, now, report, dry_run)
         return
 
-    df = _recent_ohlcv(loader, trade.symbol, trade.entry_fill_date, today, offline)
     bro = settings.broker
 
-    # 1) ratchet the chandelier and trail the server-side stop leg up to it
-    eff = trade.effective_stop if trade.effective_stop is not None else trade.stop_price
-    chand = chandelier(df, settings.risk.chandelier_lookback, settings.risk.chandelier_multiple)
-    if chand is not None and (eff is None or chand > eff):
-        eff = chand
-        if not dry_run:
-            trade.effective_stop = eff
-            trade.chandelier_stop = chand
-            if trade.stop_loss_order_id:
-                broker.replace_stop(trade.stop_loss_order_id, stop_price=eff)  # non-fatal
-
-    # 2) time-stop (brackets don't expire) or earnings exit: cancel the OCO legs,
-    #    then market-sell what is still held.
+    # time-stop (brackets don't expire) or earnings exit: cancel the OCO legs,
+    # then market-sell what is still held.
     reason = None
     if _bars_held(trade.entry_fill_date, today) >= bro.max_hold_bars:
         reason = "time_exit"

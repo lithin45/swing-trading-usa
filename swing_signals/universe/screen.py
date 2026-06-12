@@ -1,9 +1,15 @@
 """Two-stage universe funnel — wide scan, narrow candidate set (research files 09/12).
 
-1. Assemble the universe: S&P 500 ∪ thematic ∪ news-discovered, deduped.
-2. Liquidity pre-filter + momentum eligibility (cheap, NO LLM): drop illiquid names
-   and anything not in a confirmed uptrend near its highs.
-3. Score the survivors on a cheap momentum+technical blend; take the top N.
+1. Assemble the universe: point-in-time S&P 500 (``universe.sp500_only``, the
+   validated default), optionally ∪ thematic ∪ news-discovered for exploration.
+2. Liquidity pre-filter + momentum eligibility + extension veto (cheap, NO LLM):
+   drop illiquid names, anything not in a confirmed uptrend near its highs, and
+   anything the engine's don't-chase gate would veto anyway.
+3. Rank the survivors by the ENGINE'S OWN composite over the OHLCV-computable
+   factors; take the top N. (Until 2026-06-12 this used an ad-hoc 0.6/0.4
+   momentum/technical blend, which ordered the top-N differently than the engine
+   orders signals — a name the engine ranked top-8 could miss the candidate list
+   entirely, a live-vs-validated decision flip the backtest never sees.)
 4. Merge news-surfaced movers that also cleared eligibility (a fresh catalyst may not
    yet rank top-N on its own).
 5. Return the bounded candidate set the full pipeline then scores — only these reach
@@ -18,9 +24,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ..factors import indicators as ind
 from ..factors.f01_technical import TechnicalFactor
 from ..factors.f08_momentum import MomentumFactor
-from ..scoring.engine import _liquidity_ok
+from ..factors.f09_setup import SetupFactor
+from ..scoring.engine import _liquidity_ok, composite_score
 from .membership import sp500
 from .thematic import thematic_symbols
 
@@ -33,8 +41,17 @@ if TYPE_CHECKING:
 log = logging.getLogger("swing_signals.universe")
 
 
-def assemble_universe(extra: list[str] | None = None) -> list[str]:
-    """S&P 500 ∪ thematic ∪ ``extra`` (news-discovered), deduped and sorted."""
+def assemble_universe(
+    extra: list[str] | None = None, *, sp500_only: bool = False
+) -> list[str]:
+    """S&P 500 ∪ thematic ∪ ``extra`` (news-discovered), deduped and sorted.
+
+    ``sp500_only`` drops the thematic and discovered names: every validated holdout
+    traded point-in-time S&P 500 members only, and budget slots spent on names the
+    validation never saw make the paper record unattributable to the tested strategy.
+    """
+    if sp500_only:
+        return sorted(set(sp500()))
     syms = set(sp500()) | set(thematic_symbols()) | {s.upper() for s in (extra or [])}
     return sorted(syms)
 
@@ -53,12 +70,20 @@ def screen(
     from ..data.loader import DataLoader
 
     loader = loader if loader is not None else DataLoader(settings, secrets)
-    universe = assemble_universe(discovered)
+    sp500_only = settings.universe.sp500_only
+    universe = assemble_universe(discovered, sp500_only=sp500_only)
+    if sp500_only and (discovered or thematic_symbols()):
+        log.info(
+            "universe screen: restricted to S&P 500 members (the validated universe) — "
+            "thematic/news-discovered names excluded (universe.sp500_only)"
+        )
     log.info("universe screen: scanning %d symbols (no LLM)", len(universe))
 
     # Cheap OHLCV-only load (news=False) — never fires hundreds of news-API calls.
     data = loader.load_watchlist(universe, asof, offline=offline, news=False)
-    mom, tech = MomentumFactor(), TechnicalFactor()
+    mom, tech, setup = MomentumFactor(), TechnicalFactor(), SetupFactor()
+    weights = settings.active_factor_weights()
+    max_ext = settings.scoring.max_extension_atr
     ctx = RunContext(
         settings=settings, secrets=secrets, trading_day=asof, equity=settings.account.equity
     )
@@ -67,17 +92,35 @@ def screen(
     for sym, sd in data.items():
         if not sd.ok or sd.ohlcv is None:
             continue
-        liq_ok, _price, _dvol = _liquidity_ok(sd, settings)
+        liq_ok, price, _dvol = _liquidity_ok(sd, settings)
         if not liq_ok:
             continue
-        ms = mom.compute(sd, ctx)  # momentum/technical ignore ctx, but pass it for type-safety
+        ms = mom.compute(sd, ctx)  # factors ignore ctx here, but pass it for type-safety
         if not ms.ok or not ms.raw.get("eligible"):
             continue  # long-only into strength
-        ts = tech.compute(sd, ctx)
-        pre = 0.6 * ms.value + 0.4 * (ts.value if ts.ok else 50.0)
+        # Mirror the engine's don't-chase veto: an extended name is a guaranteed
+        # engine rejection, so it must not burn a top_n_scan slot that could have
+        # carried a tradable candidate (the backtest scores ALL members, so a slot
+        # burned here is a live-only decision change).
+        if max_ext > 0:
+            ema20 = float(ind.ema(sd.ohlcv["close"], 20).iloc[-1])
+            atr_ext = float(
+                ind.atr(
+                    sd.ohlcv["high"], sd.ohlcv["low"], sd.ohlcv["close"],
+                    settings.risk.atr_period,
+                ).iloc[-1]
+            )
+            if atr_ext > 0 and (price - ema20) / atr_ext > max_ext:
+                continue
+        # Rank by the engine's own composite over the OHLCV-computable factors —
+        # with news at weight 0 this IS the engine's ranking key, so the top-N cut
+        # and the engine's signal ranking can never disagree about ordering.
+        subs = [ms, tech.compute(sd, ctx), setup.compute(sd, ctx)]
+        pre, _ = composite_score(subs, weights)
         scored.append((sym, pre))
 
-    scored.sort(key=lambda x: x[1], reverse=True)
+    # Alphabetical tie-break, matching the engine's ranking exactly.
+    scored.sort(key=lambda x: (-x[1], x[0]))
     eligible = {s for s, _ in scored}
     top = [s for s, _ in scored[: settings.universe.top_n_scan]]
 
@@ -104,7 +147,7 @@ def resolve_universe(
         return settings.watchlist.symbols
 
     discovered: list[str] = []
-    if not offline:
+    if not offline and not settings.universe.sp500_only:
         try:
             from ..news.discovery import discover_movers
 

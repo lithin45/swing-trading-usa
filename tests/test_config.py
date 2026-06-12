@@ -13,6 +13,7 @@ from swing_signals.config_loader import (
     _normalize_db_url,
     load_secrets,
     load_settings,
+    redact_db_url,
     resolve_db_url,
 )
 
@@ -143,6 +144,25 @@ def test_resolve_db_url_secrets_only_when_passed(monkeypatch):
 
 def test_normalize_leaves_sqlite_untouched():
     assert _normalize_db_url("sqlite:///signals.db") == "sqlite:///signals.db"
+
+
+def test_redact_db_url_strips_credentials():
+    # the normalized form GitHub's exact-value secret masking does NOT cover
+    out = redact_db_url("postgresql+psycopg://neondb_owner:S3cretPw@ep-x.neon.tech/sig?sslmode=require")
+    assert out == "postgresql+psycopg://***@ep-x.neon.tech/sig"
+    assert "S3cretPw" not in out
+    assert "neondb_owner" not in out  # whole userinfo masked, not just the password
+
+
+def test_redact_db_url_sqlite_passthrough():
+    assert redact_db_url("sqlite:///signals.db") == "sqlite:///signals.db"
+
+
+def test_redact_db_url_fails_closed_on_schemeless_credentials():
+    # a typo'd env var can drop the scheme; urlsplit then leaves user:pass in the
+    # path — the helper must redact wholesale rather than echo it back
+    out = redact_db_url("neondb_owner:S3cretPw@ep-x.neon.tech/sig")
+    assert "S3cretPw" not in out
 
 
 def test_empty_env_secrets_treated_as_unset(monkeypatch):

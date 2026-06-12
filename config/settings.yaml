@@ -28,7 +28,12 @@ watchlist:
 factors:
   momentum:       {enabled: true, weight: 0.45}   # f08 — relative strength / 52w-high / 12-1 (core edge)
   technical:      {enabled: true, weight: 0.25}   # f01 — trend/momentum confirmation
-  news_sentiment: {enabled: true, weight: 0.20}   # f02 — Claude-scored catalyst/sentiment
+  news_sentiment: {enabled: true, weight: 0.0}    # f02 — Claude-scored catalyst/sentiment.
+                                                  # Weight 0.0 (2026-06-12): inert in every backtest
+                                                  # (SymbolData.news=None), so every validated number
+                                                  # excludes it — a live weight would make the paper
+                                                  # account trade an unvalidated composite. Scores are
+                                                  # still computed + persisted as research data.
   setup:          {enabled: true, weight: 0.10}   # f09 — breakout/pullback confirmation (added Phase 2)
   # events (f03) / themes_cycles (f05) / smart_money (f06) remain unimplemented and
   # are intentionally omitted (they would only ever be excluded as FACTORS_PENDING).
@@ -69,8 +74,10 @@ risk:
   rr_target: 2.0                    # reward:risk target (2R)
   max_positions: 8                  # concurrent positions (raised for the ~$100k paper account)
   portfolio_heat_cap: 0.10          # total open risk ceiling (10%)
-  sector_heat_cap: 0.30             # max share of heat in one sector
-  max_per_sector: 2
+  max_per_sector: 2                 # sector concentration is a COUNT cap (engine); the old
+                                    # sector_heat_cap key was read by nothing and was removed
+                                    # 2026-06-12 rather than advertise a control that didn't exist
+
   daily_loss_halt: 0.03             # halt new entries at -3% day
   weekly_loss_halt: 0.06
   monthly_loss_halt: 0.10
@@ -92,12 +99,13 @@ risk:
   max_position_notional_pct: 0.20   # one position <= 20% of equity
   max_gross_exposure: 1.0           # sum of open notionals <= 100% of equity
 
-# Exit state machine (swing_signals/exits.py). mode=legacy reproduces the original
-# full-exit-at-target + hard 20-bar time-stop. mode=staged is the researched upgrade:
-# scale a partial out at the first target, ratchet to breakeven, ride a chandelier
-# trail with NO hard time cap, and time-cut only stagnant trades.
-# STATUS: staged ran live 2026-06-09 → 2026-06-10, then the broad-universe
-# experiments reverted the default to legacy (see exits.mode note below).
+# Exit state machine (swing_signals/exits.py). mode=legacy is the VALIDATED mode:
+# fixed ATR stop, full exit at the 2R target, hard 20-bar time-stop — no trailing.
+# mode=staged (partial at target, chandelier trail, stagnation cut) is retained for
+# experimentation only: it lost to legacy in the ledgered trials TWICE (2026-06-10
+# broad-universe, 2026-06-11 staged_v2/smart_hold on all three clean windows).
+# STATUS: staged ran live 2026-06-09 → 2026-06-10, then reverted; do not re-enable
+# without a fresh pre-registered trial that beats legacy on clean data.
 exits:
   mode: legacy                      # legacy | staged. Flipped back to legacy 2026-06-10: in the
                                     # broad-universe experiments the staged trail gave back more
@@ -145,6 +153,10 @@ universe:
   min_dollar_volume: 10_000_000     # $10M average daily dollar volume
   top_n_scan: 30                    # universe_screen: cheap-scan survivors handed to full scoring
   max_llm_candidates: 30            # hard cap on names that reach the (costly) Claude news factor
+  sp500_only: true                  # tradable universe = point-in-time S&P 500 ONLY (2026-06-12):
+                                    # every validated holdout traded S&P 500 members; thematic +
+                                    # news-discovered names are unvalidated and would consume the
+                                    # ~7/month budget slots — excluded until separately validated
 
 data:
   provider_order: [alpaca, yfinance, tiingo, massive, stooq]

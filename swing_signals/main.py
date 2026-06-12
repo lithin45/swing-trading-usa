@@ -58,24 +58,33 @@ def session_still_open(today: date) -> bool:
     return now_et.hour < close_hour
 
 
-def _persist(settings: Settings, today: date, result, secrets: Secrets | None = None) -> None:
-    """Best-effort write of the run + its signals/rejections to the DB (never fails the run)."""
+def _persist(settings: Settings, today: date, result, secrets: Secrets | None = None) -> bool:
+    """Write the run + its signals/rejections to the DB. Returns True on success.
+
+    The DB is the hand-off to the broker's trade step: a swallowed failure here means
+    the trade step finds no signals, submits nothing, and every healthcheck pings
+    green — so the caller must decide whether a False is fatal (it is when the broker
+    is enabled).
+    """
     try:
-        from .config_loader import resolve_db_url
+        from .config_loader import redact_db_url, resolve_db_url
         from .persistence.repository import persist_daily_run
     except ImportError:
         log.warning(
             "persistence enabled but SQLAlchemy not installed "
             "(pip install -e '.[db]'); skipping DB write"
         )
-        return
+        return False
     try:
         n = persist_daily_run(
             settings, today, result.actionable, secrets=secrets, no_trades=result.no_trades
         )
-        log.info("persisted %d signal(s) to %s", n, resolve_db_url(settings, secrets))
-    except Exception as exc:  # noqa: BLE001 - a DB error must not fail the signal run
-        log.warning("persistence failed (continuing): %s", exc)
+        url = redact_db_url(resolve_db_url(settings, secrets))
+        log.info("persisted %d signal(s) to %s", n, url)
+        return True
+    except Exception as exc:  # noqa: BLE001 - the caller decides whether this is fatal
+        log.warning("persistence failed: %s", exc)
+        return False
 
 
 def _build_budget_state(settings: Settings, secrets: Secrets, today: date):
@@ -277,9 +286,17 @@ def run(
         ConsoleAlerter().send(subject=f"swing-signals {today}", body=report)
     else:
         _dispatch_report(settings, secrets, subject=f"swing-signals {today}", body=report)
+        persist_failed = False
         if settings.run.persist:
-            _persist(settings, today, result, secrets=secrets)
+            persist_failed = not _persist(settings, today, result, secrets=secrets)
         _maybe_brief(settings, secrets, today, regime, macro, result)
+        if persist_failed and settings.broker is not None and settings.broker.enabled:
+            log.error(
+                "signal persistence FAILED with the broker enabled — the trade step "
+                "reads signals from the DB and would silently trade nothing; failing "
+                "the run so the dead-man's switch fires."
+            )
+            return 1
 
     log.info("next stages:")
     for stage in NEXT_STAGES:

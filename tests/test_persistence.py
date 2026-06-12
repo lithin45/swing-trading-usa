@@ -97,6 +97,32 @@ def test_outcome_upsert_and_open_signals(tmp_path):
         assert sig.outcome.realized_r == -1.0
 
 
+def test_persist_log_never_contains_db_credentials(monkeypatch, caplog):
+    """The daily run's 'persisted N signal(s) to ...' line lands in PUBLIC Actions logs.
+
+    The resolved URL is normalized (driver pinned, sslmode appended) so it no longer
+    equals the DATABASE_URL secret and GitHub's exact-value masking does NOT redact
+    it — the log line itself must be credential-free.
+    """
+    import logging
+    from types import SimpleNamespace
+
+    import swing_signals.persistence.repository as repo
+    from swing_signals.main import _persist
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgres://neondb_owner:S3cretPw@ep-x.neon.tech/signals"
+    )
+    monkeypatch.setattr(repo, "persist_daily_run", lambda *a, **k: 1)
+    settings = load_settings()
+    with caplog.at_level(logging.INFO, logger="swing_signals"):
+        ok = _persist(settings, DAY, SimpleNamespace(actionable=[], no_trades=True))
+    assert ok
+    assert "S3cretPw" not in caplog.text
+    assert "neondb_owner" not in caplog.text  # whole userinfo masked, not just password
+    assert "ep-x.neon.tech" in caplog.text    # host stays visible for ops triage
+
+
 def test_persist_daily_run_via_settings(tmp_path):
     settings = load_settings()
     settings.run.db_url = f"sqlite:///{tmp_path}/run.db"

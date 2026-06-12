@@ -131,7 +131,6 @@ class RiskCfg(StrictModel):
     rr_target: float = Field(gt=0)
     max_positions: int = Field(ge=1, le=50)
     portfolio_heat_cap: float = Field(gt=0, le=1)
-    sector_heat_cap: float = Field(gt=0, le=1)
     max_per_sector: int = Field(ge=1)
     daily_loss_halt: float = Field(gt=0, le=1)
     weekly_loss_halt: float = Field(gt=0, le=1)
@@ -162,6 +161,11 @@ class UniverseCfg(StrictModel):
     min_dollar_volume: float = Field(ge=0)
     top_n_scan: int = Field(default=30, ge=1)          # cheap-scan survivors handed to scoring
     max_llm_candidates: int = Field(default=30, ge=1)  # cap on names reaching the Claude factor
+    # Live tradable universe = point-in-time S&P 500 only — the universe every
+    # validated holdout traded. False re-admits thematic + news-discovered names,
+    # which are unvalidated and consume the scarce monthly budget slots; flip it
+    # only for explicitly-bucketed exploration, never for the evidence account.
+    sp500_only: bool = True
 
 
 class DataCfg(StrictModel):
@@ -360,6 +364,14 @@ class Secrets(BaseSettings):
     smtp_from: str | None = None
     smtp_to: str | None = None
     healthcheck_url: str | None = None
+    # Optional per-step dead-man's switches. With one shared check, a later step's
+    # success ping flips the monitor back up minutes after an earlier step failed —
+    # and a step that silently stops running looks like a normal inter-step gap.
+    # Each falls back to the shared URL when unset, so nothing breaks before the
+    # per-step checks exist on healthchecks.io.
+    healthcheck_trade_url: str | None = None
+    healthcheck_manage_url: str | None = None
+    healthcheck_track_url: str | None = None
     # --- Stage 8+ : automated paper trading + AI + cloud persistence (all optional) ---
     alpaca_api_key: SecretStr | None = None
     alpaca_secret_key: SecretStr | None = None
@@ -432,3 +444,29 @@ def resolve_db_url(settings: Settings, secrets: Secrets | None = None) -> str:
         or settings.run.db_url
     )
     return _normalize_db_url(url)
+
+
+def redact_db_url(url: str) -> str:
+    """Loggable form of a DB URL: scheme + host + db name, never credentials.
+
+    The normalized URL differs from the raw ``DATABASE_URL`` secret (driver pinned,
+    sslmode appended), so GitHub Actions' exact-value masking does NOT cover it —
+    in a public repo the full URL in a log line is a public credential. Anything
+    that logs a resolved URL must go through here. Dependency-free on purpose: a
+    redaction helper that can itself fail open is worse than none.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(url)
+        if "@" in parts.netloc:
+            host = parts.netloc.rsplit("@", 1)[1]
+            return f"{parts.scheme}://***@{host}{parts.path}"
+        if "@" in url:
+            # '@' outside the netloc means urlsplit did not isolate the credentials
+            # (e.g. a scheme-less 'user:pass@host/db' from a typo'd env var) — don't
+            # risk echoing them.
+            return "<unparseable db url - redacted>"
+        return f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.scheme else url
+    except Exception:  # noqa: BLE001 - never raise, never echo the input back
+        return "<unparseable db url - redacted>"

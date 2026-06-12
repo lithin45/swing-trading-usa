@@ -197,7 +197,12 @@ def test_bracket_fill_opens_and_captures_legs(tmp_path, monkeypatch):
     assert t["stop_loss_order_id"] == "SL1"
 
 
-def test_bracket_trails_stop_leg(tmp_path, monkeypatch):
+def test_bracket_stop_leg_holds_no_trail(tmp_path, monkeypatch):
+    """Legacy brackets HOLD the server-side stop leg at the fixed ATR stop.
+
+    Pre-2026-06-12 this path trailed a chandelier — an exit family that lost the
+    ledgered trials — so live paper evidence described an unvalidated policy.
+    """
     s = _settings(tmp_path)
     broker = FakeBracketBroker(positions=[BrokerPosition("AAPL", 333, 100.0, 38628.0, 0.0, 116.0)])
     _seed_trade(s.run.db_url, status="open", qty=333.0, stop_price=94.0, effective_stop=94.0,
@@ -207,8 +212,8 @@ def test_bracket_trails_stop_leg(tmp_path, monkeypatch):
     reconcile_and_manage(s, _secrets(monkeypatch), today=DAY, broker=broker, loader=FakeLoader(df))
     t = _read(s.run.db_url)
     assert t["status"] == "open"
-    assert t["effective_stop"] > 94.0
-    assert broker.replaced and broker.replaced[0][0] == "SL1"  # trailed the server-side stop
+    assert t["effective_stop"] == 94.0   # HOLDS — no trail in legacy
+    assert not broker.replaced           # the server-side stop leg was never moved
 
 
 def test_bracket_time_stop_cancels_legs_and_sells(tmp_path, monkeypatch):
