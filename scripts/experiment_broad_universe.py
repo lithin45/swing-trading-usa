@@ -317,5 +317,46 @@ VARIANTS["hold40"] = _mut_hold40
 VARIANTS["staged_v2"] = _mut_staged_v2
 
 
+# --- Round 4 (2026-06-11, pre-registered after r3 landed): r3 said the exit
+# LEASH is the live axis — hold40 best-in-class on the 2020-21 trend (+0.168R,
+# PF 1.35) and worst-in-class in 2015-16 chop (-0.228R). The asymmetric leash
+# already exists in the exit machine as pure config: cut a trade that is not
+# yet working at the stagnation gate, give working trades a longer backstop.
+# Parameters are the SHIPPED staged-mode defaults (stagnation 15 bars / +1R,
+# backstop 60->40), not swept values. brake rides along because the absorbing
+# halt must die for live anyway; its cost shows only as deeper within-window
+# DD on windows that previously froze.
+
+
+def _mut_smart_hold(s):
+    # Full exit at the 2R target (no partial), stagnation cut for non-workers,
+    # 40-bar backstop for workers. partial_take_frac=1.0 => takes_partial=False
+    # => first-target EXIT_ALL, exactly the legacy target behavior.
+    s.exits.mode = "staged"
+    s.exits.partial_take_frac = 1.0
+    s.exits.move_stop_to = "none"
+    s.exits.stagnation_bars = 15
+    s.exits.stagnation_min_r = 1.0
+    s.exits.hard_backstop_bars = 40
+    return s
+
+
+def _mut_smart_hold_brake(s):
+    _mut_smart_hold(s)
+    _mut_brake(s)
+    return s
+
+
+def _mut_hold40_brake(s):
+    _mut_hold40(s)
+    _mut_brake(s)
+    return s
+
+
+VARIANTS["smart_hold"] = _mut_smart_hold
+VARIANTS["smart_hold_brake"] = _mut_smart_hold_brake
+VARIANTS["hold40_brake"] = _mut_hold40_brake
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

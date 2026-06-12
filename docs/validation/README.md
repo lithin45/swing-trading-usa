@@ -19,8 +19,10 @@ messages or session notes anymore.
 
 All of the following, simultaneously, before any non-paper deployment:
 
-1. **Expectancy > 0 and PF ≥ 1.2 on ≥ 2 untouched OOS windows** (currently:
-   2025-01→2026-06 holdout and 2017–2019 — both pass, ~+0.11R, PF ~1.27).
+1. **Expectancy > 0 and PF ≥ 1.2 on ≥ 2 untouched OOS windows.** (The
+   pre-2026-06-11 "+0.11R / PF 1.27" numbers were contaminated — cache holes,
+   zombie signals, no halt replay; see `docs/strategy-uplift-2026-06-11.md`.
+   The honest holdout status lives in that report's §3.)
 2. **DSR ≥ 0.95 vs the ledger's selection count** — the edge must survive its
    own selection process (see the latest sweep file for the current number and
    its var(SR)-proxy caveat).

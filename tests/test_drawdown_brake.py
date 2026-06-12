@@ -55,9 +55,10 @@ def _flat_curve(n: int, level: float, days_start: date) -> tuple[list[float], li
     return eq, days
 
 
-def test_default_halt_is_absorbing():
-    # Peak 100k, then flat at 84k for 30 bars: resume_days=0 (default) stays halted.
-    risk = _quiet_risk_cfg()
+def test_zero_resume_days_is_absorbing():
+    # Peak 100k, then flat at 84k for 30 bars: resume_days=0 (the code default,
+    # explicit here since settings.yaml now ships the brake) stays halted forever.
+    risk = _quiet_risk_cfg(drawdown_peak_lookback=0, halt_resume_days=0)
     eq, days = _flat_curve(30, 84_000.0, date(2024, 1, 2))
     eq[0] = 100_000.0
     halt, mult, why = halt_state(risk, 100_000.0, eq, days, days[-1] + timedelta(days=1))
@@ -114,9 +115,11 @@ def _snaps(levels: list[float], start: date) -> list[FakeSnap]:
     return out
 
 
-def test_gates_default_absorbing():
+def test_gates_zero_resume_days_absorbing():
     s = load_settings()
     s.risk.daily_loss_halt = s.risk.weekly_loss_halt = s.risk.monthly_loss_halt = 0.99
+    s.risk.drawdown_peak_lookback = 0
+    s.risk.halt_resume_days = 0
     snaps = _snaps([100_000.0] + [84_000.0] * 30, date(2023, 11, 1))
     g = evaluate_gates(s, account=_acct(84_000.0), open_trades=[], snapshots=snaps, today=TODAY)
     assert g.halted and "drawdown" in g.halt_reason

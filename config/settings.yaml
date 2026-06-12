@@ -76,6 +76,16 @@ risk:
   monthly_loss_halt: 0.10
   drawdown_derisk: 0.10             # cut risk 50% when -10% from peak
   drawdown_hard_halt: 0.15          # full halt + review at -15%
+  # Non-absorbing drawdown brake (2026-06-11). The original hard halt froze the
+  # account forever (no entries -> equity flat -> drawdown never recovers): the
+  # 2017-19 replay spent 306/752 days dead and missed all of 2019. The brake
+  # keeps -15% as the halt line but (a) measures drawdown vs a TRAILING 1-year
+  # high-water mark so an ancient peak can't anchor the halt forever, and
+  # (b) after 10 consecutive halted sessions re-opens entries at 25% size —
+  # the "review pause", then earn the size back through the derisk band.
+  drawdown_peak_lookback: 252       # trading days; 0 = all-time peak (old behavior)
+  halt_resume_days: 10              # consecutive halted sessions before resuming
+  halt_resume_risk_mult: 0.25       # resumed-entry size until drawdown < derisk band
   # Concentration caps: risk-at-stop sizing gives the LARGEST dollar position to the
   # LOWEST-vol names (1% risk / 2% stop = 50% of equity!) — bound the gap risk a stop
   # can't contain. Gross cap 1.0 = entries never lever the account (Alpaca grants 2x).

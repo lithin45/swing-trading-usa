@@ -33,6 +33,8 @@ def main() -> int:
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
     ap.add_argument("--label", default=None, help="ledger id suffix (default: window)")
+    ap.add_argument("--config-note", default="combo_lncw (deployed)",
+                    help="config description recorded in the ledger row")
     ap.add_argument("--no-ledger", action="store_true")
     args = ap.parse_args()
     start, end = date.fromisoformat(args.start), date.fromisoformat(args.end)
@@ -117,9 +119,9 @@ def main() -> int:
     if not args.no_ledger:
         try:
             append_trial(Trial(
-                id=f"2026-06-10-window-combo-{label}",
+                id=f"{date.today()}-window-{label}",
                 date=str(date.today()), window=f"{start}..{end}",
-                universe="sp500-pit-union", config="combo_lncw (deployed)",
+                universe="sp500-pit-union", config=args.config_note,
                 purpose="validation", source="scripts/run_validation_window.py",
                 n_trades=m["n_trades"], expectancy_r=m["expectancy"],
                 profit_factor=(m["profit_factor"]
