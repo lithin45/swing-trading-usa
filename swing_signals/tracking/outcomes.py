@@ -2,10 +2,17 @@
 
 A second daily job. For every signal still open in the DB it walks the bars from
 the day after the signal forward and decides whether the trade hit its stop,
-target, or time-stop — using the *same* exit conventions as the backtest (enter at
-the next bar's open; gap-through stop fills at the open; stop checked before target
-intraday; time-stop at the close) so live results are comparable to the backtest
-on the same accounting. It records realized R, %-return, bars held, and MAE/MFE.
+target, or time-stop. Exits use the *same* conventions as the backtest (gap-through
+stop fills at the open; stop checked before target intraday; time-stop at the
+close). The ENTRY, however, is a deliberately simple **market-at-next-open
+reference model** (next bar's open + cost bps) — NOT the limit-at-zone-top with
+market fallback that live and the backtest use — so the theoretical grade is a
+stable benchmark, and entry-model mismatch vs live is measured separately by
+``tracking.reconcile`` (the authoritative slippage report).
+
+Where a signal has a real broker fill in ``trades``, the tracker also writes the
+fill onto the outcome row (``actual_entry``) together with ``slippage`` — the
+signed fractional difference of the fill vs the reference-model entry.
 
 ``resolve_outcome`` is a pure function (no DB / network) so the exit logic is unit
 tested directly; ``run_tracker`` wires it to the DB and the data layer.
@@ -68,7 +75,10 @@ def resolve_outcome(
     """Resolve one long signal against forward OHLCV via the shared exit machine.
 
     The entry bar is the first bar strictly after ``signal_date`` (signal on close,
-    execute next open). Returns ``status='open'`` while the trade is still running.
+    execute next open). This is the market-at-next-open reference model: it always
+    fills, at ``open * (1 + cost_bps)``, unlike the live limit-with-fallback entry —
+    live-vs-model entry deltas belong to ``tracking.reconcile``, not here.
+    Returns ``status='open'`` while the trade is still running.
     ``rules``/``trail`` select legacy (default — fixed stop, full exit at target,
     hard time-stop) vs staged (partial at the target, then a chandelier trail on the
     remainder, conditional stagnation time-stop). Realized R blends the two legs.
@@ -184,7 +194,7 @@ def run_tracker(
     from ..config_loader import resolve_db_url
     from ..data.loader import DataLoader
     from ..persistence.db import make_engine, session_scope
-    from ..persistence.repository import open_signals, upsert_outcome
+    from ..persistence.repository import get_trade, open_signals, upsert_outcome
 
     today = today or date.today()
     bt = settings.backtest or {}
@@ -230,10 +240,22 @@ def run_tracker(
             )
             if res is None:
                 continue
+            # When the broker actually traded this signal, copy the real fill onto the
+            # outcome and record slippage = (fill - model entry) / model entry (signed
+            # fraction; positive = paid more than the next-open reference). Signals the
+            # broker never filled keep both columns null.
+            fill_fields: dict[str, float] = {}
+            trade = get_trade(session, sig.signal_date, sig.symbol)
+            if trade is not None and trade.actual_entry is not None and res.entry_fill > 0:
+                fill_fields["actual_entry"] = trade.actual_entry
+                fill_fields["slippage"] = round(
+                    (trade.actual_entry - res.entry_fill) / res.entry_fill, 6
+                )
             upsert_outcome(
                 session, sig.id, status=res.status, updated_at=datetime.now(),
                 exit_price=res.exit_price, exit_date=res.exit_date, bars_held=res.bars_held,
                 realized_r=res.realized_r, pct_return=res.pct_return, mae=res.mae, mfe=res.mfe,
+                **fill_fields,
             )
             resolved += 1
             if res.status == "open":

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from .models import (
     AccountSnapshot,
     Brief,
+    BrokerRejection,
     NewsItem,
     NewsScore,
     Outcome,
@@ -134,6 +135,39 @@ def save_rejections(
             flags=json.dumps(sig.flags) if sig.flags else None,
             reasons=json.dumps(sig.reasons) if sig.reasons else None,
             explanation=sig.explanation or None,
+            created_at=created_at,
+        ))
+        inserted += 1
+    return inserted
+
+
+def save_broker_rejections(
+    session: Session, decisions: list[dict[str, Any]], *, created_at: datetime
+) -> int:
+    """Persist live entry-gate rejections (idempotent on ``(signal_date, symbol, gate)``).
+
+    Each decision dict carries ``signal_date``/``symbol``/``gate``/``reason`` and an
+    optional ``details`` dict (the cap values in force), stored as JSON. A same-day
+    re-run that hits the same gate for the same symbol inserts nothing new.
+    """
+    inserted = 0
+    for d in decisions:
+        existing = session.scalar(
+            select(BrokerRejection).where(
+                BrokerRejection.signal_date == d["signal_date"],
+                BrokerRejection.symbol == d["symbol"],
+                BrokerRejection.gate == d["gate"],
+            )
+        )
+        if existing is not None:
+            continue
+        details = d.get("details")
+        session.add(BrokerRejection(
+            signal_date=d["signal_date"],
+            symbol=d["symbol"],
+            gate=d["gate"],
+            reason=d.get("reason"),
+            details=json.dumps(details) if details else None,
             created_at=created_at,
         ))
         inserted += 1
