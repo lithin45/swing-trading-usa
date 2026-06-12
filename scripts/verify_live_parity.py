@@ -30,6 +30,15 @@ Known benign sources of divergence the report attributes explicitly:
 * sub-1e-6 indicator differences from EMA warmup over a 400-day window vs the
   full history (reported as score deltas on commonly-emitted names).
 
+NOTE (owner decision 2026-06-12, after the fix batch): live deliberately
+re-diverges on the news-factor weight (0.20, live-only) and the universe
+(``sp500_only: false`` re-admits thematic/news-discovered names), and possibly
+the legacy trail (``exits.trail_legacy_stop``, pending the r5 experiment) —
+see docs/validation/README.md. Flips attributable to those knobs are now
+EXPECTED; this script remains the acceptance check for the *mechanical* axes
+(ranking key, tie-breaks, staleness, membership, indicator parity). To verify
+those in isolation, run it with the knobs set to the validated values.
+
 Offline by construction: only the parquet cache is read (no network, no DB
 writes), and ``DataLoader.get_ohlcv(offline=True)`` trims every frame to
 ``<= asof`` so the replay is lookahead-safe.

@@ -18,17 +18,40 @@ messages or session notes anymore.
   the validation/sweep scripts, so CSCV PBO is recomputable without re-running
   backtests (the 2026-06-11 session lost its curves to `/tmp`; never again).
 
-## Paper-history void + clock restart (2026-06-12)
+## Paper-history void + what live actually runs (2026-06-12)
 
-All live paper history recorded **before the live/validated parity fix batch of
-2026-06-12** is VOID as go/no-go evidence. Until that batch, the live account was
-trading an unvalidated variant on three axes at once: (a) legacy-mode exits
-trailed a chandelier stop (`broker/manage.py`) while every validated backtest
-held the fixed 3-ATR stop, (b) the Claude news factor carried 0.20 composite
-weight live but was inert in every backtest, and (c) the live universe was
-S&P 500 ∪ thematic ∪ news-movers while every holdout traded point-in-time
-S&P 500 only. **The 3–6 month clock of go/no-go #6 restarts when the parity
-fixes deploy.**
+All live paper history recorded **before 2026-06-12** is VOID as go/no-go
+evidence: the live account was drifting from the validated config on three axes
+*silently* (chandelier trail in legacy mode, 0.20-weight news factor, universe
+superset). **The 3–6 month clock of go/no-go #6 restarts at the next deploy.**
+
+**Owner decision (2026-06-12, recorded):** live deliberately runs a VARIANT of
+the validated combo, now as explicit config rather than drift:
+
+- `factors.news_sentiment` weight **0.20 live** (owner choice). The factor is
+  structurally inert in every backtest (no point-in-time news on free data), so
+  live paper trading is its only test bed; scores persist to the DB for
+  after-the-fact attribution.
+- `universe.sp500_only: false` (owner choice): thematic + news-discovered names
+  are tradable and consume budget slots. Every validated holdout traded
+  point-in-time S&P 500 only.
+- `exits.trail_legacy_stop`: **OFF — decided by the r5 experiment, 2026-06-12**
+  (base vs legacy_trail, three dev windows, all six rows ledgered). The trail
+  lost decisively on 2015-16 (−0.134R vs −0.009R) and 2022-24 (−0.048R vs
+  +0.067R, flipping the best window negative) and won only narrowly in the
+  pure 2020-21 trend (+0.015R vs +0.004R, maxDD −12.7% vs −14.7%); summed,
+  ~+10R (fixed stop) vs ~−25R (trail) on the same signals. The owner reviewed
+  the numbers and kept the fixed stop. The flag remains wired into live and
+  the backtest legacy path identically, so the variant stays one line away
+  and re-testable.
+
+Consequences, so nobody mistakes the record later: paper results measure the
+LIVE VARIANT, not the validated combo, and may not be quoted against the
+holdout numbers without saying so. The shadow outcome tracker deliberately
+stays on the validated no-trail reference model, so the reconciliation report's
+live-vs-shadow R delta is a running measurement of what the variant's exits
+contribute; news/theme attribution comes from the persisted scores and
+universe-source tags.
 
 ## The go/no-go checklist (real capital)
 

@@ -369,5 +369,23 @@ VARIANTS["smart_hold_brake"] = _mut_smart_hold_brake
 VARIANTS["hold40_brake"] = _mut_hold40_brake
 
 
+# --- Round 5 (2026-06-12, owner-requested): chandelier-trail the LEGACY stop
+# from day one — the exact exit policy the live account ran before the parity
+# fix (broker/manage.py, now config: exits.trail_legacy_stop). Owner thesis:
+# ratcheting the stop up locks in profit on pullbacks. Distinct from the r3/r4
+# trail family (staged_v2 trailed after a partial; hold40/smart_hold changed the
+# leash, not the stop): this cell isolates the day-one trail itself, with the 2R
+# target and 20-bar time-stop unchanged. base re-runs alongside because the
+# Tiingo enrichment changed the universe since the r3/r4 baselines.
+
+
+def _mut_legacy_trail(s):
+    s.exits.trail_legacy_stop = True
+    return s
+
+
+VARIANTS["legacy_trail"] = _mut_legacy_trail
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

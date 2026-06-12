@@ -61,14 +61,16 @@ def test_assemble_universe_sp500_only_excludes_thematic_and_discovered():
     assert "IONQ" not in u and "ZZZZ" not in u
 
 
-def test_settings_default_is_sp500_only():
-    assert load_settings().universe.sp500_only is True
+def test_settings_universe_choice_is_explicit():
+    # Owner decision 2026-06-12: live trades thematic + news-discovered names too.
+    # The knob must exist either way, so the validated-universe run is one flag flip.
+    assert load_settings().universe.sp500_only is False
 
 
 def test_screen_sp500_only_never_scans_discovered_movers():
     s = load_settings()
     s.universe.top_n_scan = 5
-    assert s.universe.sp500_only is True
+    s.universe.sp500_only = True   # the validated-universe configuration
     picked = screen(s, load_secrets(), asof=ASOF,
                     loader=_FakeLoader(["NVDA", "IONQ"]), discovered=["IONQ"])
     assert "IONQ" not in picked   # discovered mover excluded from the tradable set

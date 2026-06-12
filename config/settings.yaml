@@ -28,12 +28,12 @@ watchlist:
 factors:
   momentum:       {enabled: true, weight: 0.45}   # f08 — relative strength / 52w-high / 12-1 (core edge)
   technical:      {enabled: true, weight: 0.25}   # f01 — trend/momentum confirmation
-  news_sentiment: {enabled: true, weight: 0.0}    # f02 — Claude-scored catalyst/sentiment.
-                                                  # Weight 0.0 (2026-06-12): inert in every backtest
-                                                  # (SymbolData.news=None), so every validated number
-                                                  # excludes it — a live weight would make the paper
-                                                  # account trade an unvalidated composite. Scores are
-                                                  # still computed + persisted as research data.
+  news_sentiment: {enabled: true, weight: 0.20}   # f02 — Claude-scored catalyst/sentiment.
+                                                  # LIVE-ONLY factor (owner decision 2026-06-12): inert
+                                                  # in every backtest (SymbolData.news=None), so the
+                                                  # validated holdout numbers exclude it. Live paper
+                                                  # trading is its test bed — scores persist to the DB
+                                                  # so its contribution can be judged after the fact.
   setup:          {enabled: true, weight: 0.10}   # f09 — breakout/pullback confirmation (added Phase 2)
   # events (f03) / themes_cycles (f05) / smart_money (f06) remain unimplemented and
   # are intentionally omitted (they would only ever be excluded as FACTORS_PENDING).
@@ -112,6 +112,12 @@ exits:
                                     # than it earned (PF 0.77 vs 0.89 legacy, 2022-24); the full
                                     # combo (legacy + no-chase + 3-ATR stop) validated on the
                                     # untouched 2025→2026-06 holdout (+0.118R, PF 1.27).
+  trail_legacy_stop: false          # chandelier-trail the legacy stop from day one. FALSE = the
+                                    # validated combo (fixed ATR stop). Pending the 2026-06-12
+                                    # owner experiment: the trail variant is being backtested on
+                                    # the three dev windows before deciding; the same flag drives
+                                    # live (broker/manage.py) and the backtest legacy path, and the
+                                    # shadow tracker stays no-trail so live-vs-shadow R measures it.
   partial_take_frac: 0.5            # fraction sold at the first (2R) target in staged mode
   move_stop_to: breakeven           # breakeven | none — where the stop goes after the partial
   stagnation_bars: 15               # cut a not-yet-working trade after this many bars
@@ -153,10 +159,12 @@ universe:
   min_dollar_volume: 10_000_000     # $10M average daily dollar volume
   top_n_scan: 30                    # universe_screen: cheap-scan survivors handed to full scoring
   max_llm_candidates: 30            # hard cap on names that reach the (costly) Claude news factor
-  sp500_only: true                  # tradable universe = point-in-time S&P 500 ONLY (2026-06-12):
-                                    # every validated holdout traded S&P 500 members; thematic +
-                                    # news-discovered names are unvalidated and would consume the
-                                    # ~7/month budget slots — excluded until separately validated
+  sp500_only: false                 # owner decision 2026-06-12: live also trades thematic +
+                                    # news-discovered names. NOTE: every validated holdout traded
+                                    # point-in-time S&P 500 only, and these names consume the
+                                    # ~7/month budget slots — paper results measure the LIVE
+                                    # variant, not the validated combo (docs/validation/README.md).
+                                    # true = the validated universe.
 
 data:
   provider_order: [alpaca, yfinance, tiingo, massive, stooq]

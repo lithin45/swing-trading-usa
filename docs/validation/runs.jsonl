@@ -1,0 +1,8 @@
+{"date": "2026-06-12", "window": "2022-01-03..2022-04-29", "config_md5": "699b4d30c46c", "n_trades": 7, "expectancy_r": -0.2714, "equity_end": 98715.31}
+{"date": "2026-06-12", "window": "2022-01-03..2022-04-29", "config_md5": "baebbc5009fa", "n_trades": 7, "expectancy_r": -0.6097, "equity_end": 96836.99}
+{"date": "2026-06-12", "window": "2015-01-01..2016-12-31", "config_md5": "699b4d30c46c", "n_trades": 131, "expectancy_r": -0.0086, "equity_end": 100355.28}
+{"date": "2026-06-12", "window": "2015-01-01..2016-12-31", "config_md5": "baebbc5009fa", "n_trades": 140, "expectancy_r": -0.1335, "equity_end": 86092.15}
+{"date": "2026-06-12", "window": "2020-01-01..2021-12-31", "config_md5": "699b4d30c46c", "n_trades": 138, "expectancy_r": 0.0037, "equity_end": 96775.49}
+{"date": "2026-06-12", "window": "2020-01-01..2021-12-31", "config_md5": "baebbc5009fa", "n_trades": 139, "expectancy_r": 0.0145, "equity_end": 96557.9}
+{"date": "2026-06-12", "window": "2022-01-01..2024-12-31", "config_md5": "699b4d30c46c", "n_trades": 163, "expectancy_r": 0.067, "equity_end": 107205.19}
+{"date": "2026-06-12", "window": "2022-01-01..2024-12-31", "config_md5": "baebbc5009fa", "n_trades": 170, "expectancy_r": -0.0475, "equity_end": 93053.17}

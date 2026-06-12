@@ -234,6 +234,13 @@ class ExitsCfg(StrictModel):
     stagnation_bars: int = Field(default=15, ge=1)            # cut a non-working trade after N bars
     stagnation_min_r: float = Field(default=1.0)              # "working" threshold (R)
     hard_backstop_bars: int = Field(default=60, ge=1)         # absolute max hold
+    # Chandelier-trail the stop in LEGACY mode too, from day one (owner decision
+    # 2026-06-12). False is the validated combo (fixed ATR stop; the trailed-exit
+    # family lost the ledgered trials). The flag drives live (broker/manage.py)
+    # and the backtest legacy path identically, so the trailed variant is
+    # replayable; the shadow outcome tracker stays on the validated no-trail
+    # reference, so live-vs-shadow R deltas measure what the trail contributes.
+    trail_legacy_stop: bool = False
 
 
 class SizingCfg(StrictModel):

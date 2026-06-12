@@ -165,9 +165,16 @@ class BacktestRunner:
         # backfill). When present, _build_symbol_data sets next_earnings so the
         # engine's EARNINGS_SOON veto replays in backtests (it was inert before).
         self._earnings = earnings_history
-        # Exit rules (legacy/staged) + a per-symbol chandelier trail series (staged only).
+        # Exit rules (legacy/staged) + a per-symbol chandelier trail series. Staged
+        # trails after the partial; exits.trail_legacy_stop trails the legacy stop
+        # from day one (the live owner-variant of 2026-06-12) so that variant is
+        # replayable here with identical semantics.
         self.rules = build_rules(settings, bt_cfg.max_hold_bars)
-        self._staged = getattr(getattr(settings, "exits", None), "mode", "legacy") == "staged"
+        exits_cfg = getattr(settings, "exits", None)
+        self._staged = getattr(exits_cfg, "mode", "legacy") == "staged"
+        self._trail_legacy = (
+            not self._staged and getattr(exits_cfg, "trail_legacy_stop", False)
+        )
         self._chand: dict[str, pd.Series] = {}
         register_builtins()
 
@@ -713,8 +720,9 @@ class BacktestRunner:
             # Trail the chandelier only AFTER the partial is taken (staged). Before
             # that the fixed initial stop stands, so a trade can reach its +2R target
             # instead of being clipped near breakeven by an early trail. The stop
-            # only ever rises.
-            if self._staged and pos.partial_done:
+            # only ever rises. trail_legacy_stop trails from day one instead — the
+            # live owner-variant, mirrored here so it is testable.
+            if (self._staged and pos.partial_done) or self._trail_legacy:
                 chand = self._chandelier_at(ticker, bar)
                 if chand is not None and chand > pos.effective_stop:
                     pos.effective_stop = chand
