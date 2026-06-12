@@ -129,6 +129,7 @@ class BacktestRunner:
         sector_of: dict[str, str] | None = None,
         vix_series: pd.Series | None = None,
         vix3m_series: pd.Series | None = None,
+        earnings_history=None,
     ) -> None:
         self.settings = settings
         self.bt_cfg = bt_cfg
@@ -145,6 +146,10 @@ class BacktestRunner:
         # vol level (vix_max veto, backwardation) instead of only the SPY-ATR% proxy.
         self._vix = _clean_series(vix_series)
         self._vix3m = _clean_series(vix3m_series)
+        # Historical earnings report dates (data/earnings_dates.csv via the AV
+        # backfill). When present, _build_symbol_data sets next_earnings so the
+        # engine's EARNINGS_SOON veto replays in backtests (it was inert before).
+        self._earnings = earnings_history
         # Exit rules (legacy/staged) + a per-symbol chandelier trail series (staged only).
         self.rules = build_rules(settings, bt_cfg.max_hold_bars)
         self._staged = getattr(getattr(settings, "exits", None), "mode", "legacy") == "staged"
@@ -523,6 +528,8 @@ class BacktestRunner:
                 panel = self._panel_for(ticker, df).loc[:ts]
                 if len(panel) > 0:
                     sd.indicators = panel.iloc[-1].to_dict()
+                if self._earnings is not None:
+                    sd.next_earnings = self._earnings.next_after(ticker, asof)
             result[ticker] = sd
         return result
 

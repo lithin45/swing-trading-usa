@@ -158,6 +158,17 @@ def main() -> int:
         if len(w) > 1:
             print(f"SPY buy-and-hold {start}..{end}: {w.iloc[-1] / w.iloc[0] - 1.0:+.1%}\n")
 
+    # Historical earnings dates (AV backfill): when the committed table exists,
+    # the EARNINGS_SOON veto replays in these runs. Coverage is printed so a
+    # partially-backfilled table is never mistaken for full screening.
+    from swing_signals.data.earnings_history import EarningsHistory
+
+    earnings_hist = EarningsHistory.load()
+    if earnings_hist is not None:
+        covered = sum(1 for s in ohlcv_all if s in earnings_hist)
+        print(f"earnings history: {covered}/{len(ohlcv_all)} loaded symbols covered "
+              f"(veto replay {'ON' if covered else 'OFF'})\n", flush=True)
+
     shared_panels: dict = {}
     rows = []
     for name in names:
@@ -171,7 +182,7 @@ def main() -> int:
         runner = BacktestRunner(
             settings=s, bt_cfg=bt_cfg, ohlcv_all=ohlcv_all, index_ohlcv=index_ohlcv,
             secrets=secrets, universe_asof=members_asof, sector_of=sector_of,
-            vix_series=vix, vix3m_series=vix3m,
+            vix_series=vix, vix3m_series=vix3m, earnings_history=earnings_hist,
         )
         runner._panels = shared_panels  # noqa: SLF001 - identical across variants
         if name == "rank121":

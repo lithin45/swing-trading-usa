@@ -83,6 +83,14 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001 - degrade to the ATR proxy, loudly
             print(f"FRED unavailable ({exc}) — regime uses the SPY-ATR% proxy", flush=True)
 
+    from swing_signals.data.earnings_history import EarningsHistory
+
+    earnings_hist = EarningsHistory.load()
+    if earnings_hist is not None:
+        covered = sum(1 for s in ohlcv_all if s in earnings_hist)
+        print(f"earnings history: {covered}/{len(ohlcv_all)} symbols covered "
+              f"(veto replay {'ON' if covered else 'OFF'})", flush=True)
+
     bt_cfg = BacktestCfg(
         start=str(start), end=str(end), cost_bps=10.0,
         max_hold_bars=settings.broker.max_hold_bars if settings.broker else 20,
@@ -91,7 +99,7 @@ def main() -> int:
     runner = BacktestRunner(
         settings=settings, bt_cfg=bt_cfg, ohlcv_all=ohlcv_all, index_ohlcv=index_ohlcv,
         secrets=secrets, universe_asof=members_asof, sector_of=sector_map(),
-        vix_series=vix, vix3m_series=vix3m,
+        vix_series=vix, vix3m_series=vix3m, earnings_history=earnings_hist,
     )
     res = runner.run(start, end)
     report = format_backtest_report(res)
