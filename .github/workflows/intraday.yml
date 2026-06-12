@@ -38,6 +38,7 @@ jobs:
           SWING_ALPACA_API_KEY: ${{ secrets.SWING_ALPACA_API_KEY }}
           SWING_ALPACA_SECRET_KEY: ${{ secrets.SWING_ALPACA_SECRET_KEY }}
           SWING_FINNHUB_API_KEY: ${{ secrets.SWING_FINNHUB_API_KEY }}
+          SWING_TIINGO_API_KEY: ${{ secrets.SWING_TIINGO_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SWING_HEALTHCHECK_URL: ${{ secrets.SWING_HEALTHCHECK_INTRADAY_URL }}
         run: swing-signals manage

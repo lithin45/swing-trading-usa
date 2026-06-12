@@ -147,7 +147,10 @@ universe:
   max_llm_candidates: 30            # hard cap on names that reach the (costly) Claude news factor
 
 data:
-  provider_order: [alpaca, yfinance, stooq] # first that succeeds wins; alpaca/stooq need keys
+  provider_order: [alpaca, yfinance, tiingo, stooq] # first that succeeds wins; alpaca/tiingo/stooq
+                                    # need keys. tiingo sits BEHIND the primaries (free tier caps
+                                    # unique symbols/month) but covers many DELISTED tickers —
+                                    # the only free dent in the survivorship residual.
   cache_dir: .cache
   lookback_days: 400                # enough for 200-DMA + ATR warmup
   max_staleness_days: 4             # data older than this → skip the stock (fail-loud)

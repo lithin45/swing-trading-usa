@@ -51,6 +51,14 @@ class DataLoader:
                     log.info("alpaca provider disabled (no SWING_ALPACA_API_KEY/SECRET_KEY)")
             elif name == "yfinance":
                 providers.append(YfinanceProvider())
+            elif name == "tiingo":
+                from .tiingo_provider import TiingoProvider
+
+                tp = TiingoProvider(api_key=_reveal(self.secrets.tiingo_api_key))
+                if tp.available:
+                    providers.append(tp)
+                else:
+                    log.info("tiingo provider disabled (no SWING_TIINGO_API_KEY)")
             elif name == "stooq":
                 sp = StooqProvider(api_key=_reveal(self.secrets.stooq_api_key))
                 if sp.available:
